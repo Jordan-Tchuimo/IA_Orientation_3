@@ -1,5 +1,4 @@
 flet
-fpdf
-scikit-learn
+fpdf2
 pandas
-sqlite3
+scikit-learn
