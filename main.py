@@ -190,4 +190,6 @@ async def main(page: ft.Page):
     page.add(ft.Container(content=ft.Column([ft.Icon(ft.Icons.LOCK, size=80, color=ft.Colors.LIGHT_GREEN_400), ft.Text("CONNEXION", size=24, weight="bold"), user_log, pass_log, ft.Button("OUVRIR", on_click=tenter_connexion, width=320)], horizontal_alignment="center"), alignment=ft.Alignment(0,0), expand=True))
 
 if __name__ == "__main__":
-    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8550)
+    # Render utilise la variable d'environnement PORT
+    port = int(os.environ.get("PORT", 8550)) 
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port)
