@@ -1,0 +1,5 @@
+flet
+fpdf
+scikit-learn
+pandas
+sqlite3
