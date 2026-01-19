@@ -9,8 +9,8 @@ def generer():
     filieres = ["SCIENCES", "ARTS"]
     
     for _ in range(600):
-        m_sci = round(random.uniform(8, 18), 2)
-        m_lit = round(random.uniform(8, 18), 2)
+        m_sci = round(random.uniform(6, 18), 2)
+        m_lit = round(random.uniform(6, 18), 2)
         rev = random.choice(revenus)
         int_ = random.choice(interets)
         
