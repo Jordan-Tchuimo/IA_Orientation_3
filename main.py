@@ -204,21 +204,62 @@ async def main(page: ft.Page):
     
     res_container = ft.Container(bgcolor=ft.Colors.BLUE_GREY_800, padding=25, border_radius=25, content=ft.Column([ft.Text("📊 POIDS DÉCISIONNEL", weight="bold", size=14), xai_display], horizontal_alignment="center", spacing=15))
 
-    async def tenter_connexion(e):
-        if verifier_acces(user_log.value, pass_log.value):
+   # --- LOGIQUE DE CONNEXION CORRIGÉE ---
+    async def tenter_connexion(e): # Ajout de 'e' ici
+        user = user_log.value.strip()
+        pwd = pass_log.value.strip()
+        
+        if verifier_acces(user, pwd):
             page.clean()
-            page.add(ft.Column([
-                ft.Container(gradient=ft.LinearGradient(colors=[ft.Colors.INDIGO_900, ft.Colors.GREEN_900]), padding=25, content=ft.Row([header_title, ft.IconButton(ft.Icons.LIGHT_MODE, on_click=changer_theme)], alignment="center")),
-                ft.Container(height=20), main_card, ft.Container(height=20),
-                ft.Row([ft.Column([res_final, conf_txt, prog_conf], horizontal_alignment="center", width=550), res_container], alignment="center")
-            ], scroll=ft.ScrollMode.ALWAYS))
-        else: notifier("🔒 Erreur", ft.Colors.RED)
+            # Reconstruction de l'interface
+            page.add(
+                ft.AppBar(title=ft.Text("IA ORIENTATION - DASHBOARD MASTER"), bgcolor=ft.Colors.INDIGO_900),
+                ft.Column([
+                    ft.Container(height=20),
+                    ft.Container(bgcolor=ft.Colors.BLUE_GREY_800, padding=30, border_radius=20, content=ft.Column([
+                        nom_in, 
+                        ft.Row([m_sci, m_lit], alignment="center"), 
+                        rev_in, 
+                        int_in,
+                        ft.Row([
+                            ft.ElevatedButton("ANALYSER", on_click=calculer, bgcolor=ft.Colors.GREEN_700, color="white"),
+                            ft.ElevatedButton("EXPORTER PDF", on_click=exporter_pdf_action, bgcolor=ft.Colors.RED_700, color="white"),
+                        ], alignment="center")
+                    ], horizontal_alignment="center")),
+                    ft.Container(height=20),
+                    ft.Column([res_final, conf_txt, prog_conf], horizontal_alignment="center"),
+                    ft.Container(padding=20, content=xai_display)
+                ], scroll=ft.ScrollMode.ALWAYS)
+            )
+            page.update() # CRUCIAL : Dit à Render d'afficher les changements
+        else:
+            notifier("🔒 Identifiants incorrects", ft.Colors.RED)
 
-    user_log = ft.TextField(label="Admin", width=320)
-    pass_log = ft.TextField(label="Code", width=320, password=True, on_submit=tenter_connexion)
+    # --- COMPOSANTS DE LOGIN ---
+    user_log = ft.TextField(label="Identifiant", width=320)
+    pass_log = ft.TextField(label="Mot de passe", width=320, password=True, can_reveal_password=True)
+    
+    login_card = ft.Container(
+        content=ft.Column([
+            ft.Icon(ft.Icons.LOCK_PERSON, size=80, color=ft.Colors.LIGHT_GREEN_400),
+            ft.Text("CONNEXION AU SYSTÈME", size=20, weight="bold"),
+            user_log,
+            pass_log,
+            ft.ElevatedButton(
+                "ACCÉDER AU SYSTÈME", 
+                on_click=tenter_connexion, # On passe la fonction directement ici
+                width=320, 
+                bgcolor=ft.Colors.INDIGO_600, 
+                color="white"
+            )
+        ], horizontal_alignment="center"), 
+        expand=True, 
+        alignment=ft.Alignment(0,0)
+    )
 
-    page.add(ft.Container(content=ft.Column([ft.Icon(ft.Icons.LOCK, size=80), ft.Text("CONNEXION", size=24, weight="bold"), user_log, pass_log, ft.Button("OUVRIR", on_click=tenter_connexion, width=320)], horizontal_alignment="center"), alignment=ft.Alignment(0,0), expand=True))
+    page.add(login_card)
 
+# --- LANCEMENT ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8550))
     ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port, host="0.0.0.0", assets_dir="assets")
