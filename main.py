@@ -29,39 +29,24 @@ def verifier_acces(user, pwd):
     res = cursor.fetchone(); conn.close()
     return res is not None
 
-# --- 2. EXPORTATIONS ---
-def generer_csv_base():
-    conn = sqlite3.connect("orientation_data.db"); cursor = conn.cursor()
-    cursor.execute("SELECT nom, moy_sci, moy_lit, revenu, interet, score_sci, filiere, date FROM resultats ORDER BY nom ASC")
-    donnees = cursor.fetchall(); conn.close()
-    if not donnees: return "Base vide"
-    
-    nom_f = f"Export_{datetime.datetime.now().strftime('%M%S')}.csv"
-    # On place le fichier dans assets pour le rendre téléchargeable
-    chemin = os.path.join("assets", nom_f)
-    
-    with open(chemin, 'w', newline='', encoding='utf-8-sig') as f:
-        writer = csv.writer(f, delimiter=';')
-        writer.writerow(["ID", "Nom", "Moy Sci", "Moy Lit", "Revenu", "Interêt", "IA Confiance", "Filière", "Date"])
-        for index, r in enumerate(donnees, start=1):
-            ligne = [index] + list(r)
-            ligne[6] = f"{round(ligne[6] * 100, 1)}%" 
-            writer.writerow(ligne)
-    return nom_f
-
+# --- 2. LOGIQUE D'EXPORTATION ---
 def generer_pdf_complet():
-    nom_f = f"Rapport_{datetime.datetime.now().strftime('%M%S')}.pdf"
-    # Chemin vers le dossier assets
-    chemin = os.path.join("assets", nom_f)
+    # Création d'un nom de fichier unique
+    nom_f = f"Rapport_Orientation_{datetime.datetime.now().strftime('%M%S')}.pdf"
+    chemin_assets = os.path.join("assets", nom_f)
     
-    conn = sqlite3.connect("orientation_data.db"); cursor = conn.cursor()
+    conn = sqlite3.connect("orientation_data.db")
+    cursor = conn.cursor()
     cursor.execute("SELECT nom, moy_sci, moy_lit, filiere, score_sci FROM resultats ORDER BY nom ASC")
-    donnees = cursor.fetchall(); conn.close()
+    donnees = cursor.fetchall()
+    conn.close()
     
     if not donnees: return "Base vide"
     
     pdf = FPDF(); pdf.add_page(); pdf.set_font("helvetica", "B", 16)
-    pdf.cell(0, 10, "RAPPORT D'ORIENTATION ALPHABETIQUE", align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT); pdf.ln(10)
+    pdf.cell(0, 10, "RAPPORT D'ORIENTATION - IA SYSTEM", align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT); pdf.ln(10)
+    
+    # En-tête du tableau
     pdf.set_font("helvetica", "B", 10); pdf.set_fill_color(200, 220, 255)
     pdf.cell(10, 8, "N°", border=1, fill=True); pdf.cell(50, 8, "Nom", border=1, fill=True); pdf.cell(15, 8, "Sci", border=1, fill=True); pdf.cell(15, 8, "Lit", border=1, fill=True); pdf.cell(60, 8, "IA Conseil", border=1, fill=True); pdf.cell(20, 8, "Conf.", border=1, fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     
@@ -69,12 +54,13 @@ def generer_pdf_complet():
     for i, r in enumerate(donnees, start=1):
         pdf.cell(10, 8, str(i), border=1); pdf.cell(50, 8, str(r[0]), border=1); pdf.cell(15, 8, str(r[1]), border=1); pdf.cell(15, 8, str(r[2]), border=1); pdf.cell(60, 8, str(r[3]), border=1); pdf.cell(20, 8, f"{round(r[4]*100, 1)}%", border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     
-    pdf.output(chemin)
+    # Sauvegarde physique sur le serveur Render
+    pdf.output(chemin_assets)
     return nom_f
 
-# --- 3. INTERFACE PRINCIPALE ---
+# --- 3. INTERFACE UTILISATEUR (FLET) ---
 async def main(page: ft.Page):
-    # Création du dossier assets si absent (pour Render)
+    # Création du dossier assets indispensable pour l'hébergement
     if not os.path.exists("assets"):
         os.makedirs("assets")
 
@@ -86,30 +72,36 @@ async def main(page: ft.Page):
     def notifier(m, c=ft.Colors.BLUE):
         page.overlay.append(ft.SnackBar(ft.Text(m, weight="bold"), bgcolor=c, open=True)); page.update()
 
-    # --- ACTIONS D'EXPORTATION ---
+    # --- ACTION D'EXPORTATION AVEC SÉCURITÉ ---
     async def exporter_pdf_action(e):
         nom_fichier = generer_pdf_complet()
         if nom_fichier != "Base vide":
-            # On lance l'URL : Render servira le fichier depuis le dossier assets
+            # 1. Fenêtre de secours pour clic manuel (très fiable)
+            dialog = ft.AlertDialog(
+                title=ft.Text("Rapport Généré !"),
+                content=ft.Column([
+                    ft.Text("Le navigateur peut bloquer le téléchargement automatique."),
+                    ft.ElevatedButton(
+                        "CLIQUEZ ICI POUR TÉLÉCHARGER", 
+                        icon=ft.Icons.DOWNLOAD,
+                        url=f"/{nom_fichier}", # Flet sert les assets à la racine
+                        on_click=lambda _: setattr(dialog, "open", False)
+                    )
+                ], tight=True),
+            )
+            page.overlay.append(dialog)
+            dialog.open = True
+            
+            # 2. Tentative de lancement automatique
             page.launch_url(f"/{nom_fichier}")
-            notifier(f"📥 Téléchargement lancé : {nom_fichier}", ft.Colors.GREEN)
+            page.update()
         else:
-            notifier("❌ La base est vide", ft.Colors.RED)
+            notifier("❌ La base de données est vide", ft.Colors.RED)
 
-    async def exporter_csv_action(e):
-        nom_fichier = generer_csv_base()
-        if nom_fichier != "Base vide":
-            page.launch_url(f"/{nom_fichier}")
-            notifier(f"📥 Téléchargement lancé : {nom_fichier}", ft.Colors.GREEN)
-        else:
-            notifier("❌ La base est vide", ft.Colors.RED)
-
-    # --- COMPOSANTS UI ---
-    header_title = ft.Text("IA ORIENTATION SYSTEM", color=ft.Colors.LIGHT_GREEN_400, size=26, weight="bold")
+    # --- COMPOSANTS UI DU DASHBOARD ---
     nom_in = ft.TextField(label="Nom de l'élève", width=450, border_radius=15)
     m_sci = ft.TextField(label="Moyenne Scientifique (0-20)", width=220, border_radius=15)
     m_lit = ft.TextField(label="Moyenne Littéraire (0-20)", width=220, border_radius=15)
-    
     rev_in = ft.Dropdown(label="Revenu familial mensuel", width=450, border_radius=15, options=[
         ft.dropdown.Option(key="Tranche_A", text="Tranche A : [0 - 150 000 FCFA]"),
         ft.dropdown.Option(key="Tranche_B", text="Tranche B : [150 000 - 450 000 FCFA]"),
@@ -125,7 +117,7 @@ async def main(page: ft.Page):
     prog_conf = ft.ProgressBar(width=400, value=0, visible=False, color=ft.Colors.LIGHT_GREEN_400)
     xai_display = ft.Column(visible=False, horizontal_alignment="center", width=380, spacing=10)
 
-    # --- LOGIQUE CALCUL ---
+    # --- LOGIQUE DE CALCUL ---
     async def calculer(e):
         try:
             sv = float(m_sci.value.strip().replace(",", ".")); lv = float(m_lit.value.strip().replace(",", "."))
@@ -133,9 +125,8 @@ async def main(page: ft.Page):
             res_final.value = f"CONSEIL IA : {filiere}"; conf_txt.value = f"Confiance IA : {round(conf*100, 2)}%"
             prog_conf.value = conf; prog_conf.visible = True
             
-            p_notes = (sv + lv) * 2
-            p_social = 35 if rev_in.value != "Tranche_A" else 15
-            p_perso = 25
+            # XAI Simulation (Interprétabilité)
+            p_notes = (sv + lv) * 2; p_social = 35 if rev_in.value != "Tranche_A" else 15; p_perso = 25
             tot = p_notes + p_social + p_perso
             pn = [p_notes/tot, p_social/tot, p_perso/tot]
             
@@ -147,62 +138,42 @@ async def main(page: ft.Page):
             xai_display.visible = True
             
             conn = sqlite3.connect("orientation_data.db"); conn.execute("INSERT INTO resultats (nom, moy_sci, moy_lit, revenu, interet, score_sci, score_lit, filiere) VALUES (?,?,?,?,?,?,?,?)", (nom_in.value.upper(), sv, lv, rev_in.value, int_in.value, conf, 0.0, filiere)); conn.commit(); conn.close()
-            notifier("✅ Analyse terminée", ft.Colors.GREEN); page.update()
-        except: notifier("❌ Entrez des nombres valides", ft.Colors.RED)
+            notifier("✅ Analyse enregistrée", ft.Colors.GREEN); page.update()
+        except: notifier("❌ Erreur de saisie", ft.Colors.RED)
 
-    # --- AUTRES FONCTIONS (STATS, HISTO, THEME) ---
-    async def changer_theme(e):
-        page.theme_mode = ft.ThemeMode.LIGHT if page.theme_mode == ft.ThemeMode.DARK else ft.ThemeMode.DARK
-        page.update()
+    # --- ASSEMBLAGE FINAL ---
+    login_card = ft.Container(content=ft.Column([
+        ft.Icon(ft.Icons.LOCK_PERSON, size=80, color=ft.Colors.LIGHT_GREEN_400),
+        ft.Text("AUTHENTIFICATION CONSEILLER", size=20, weight="bold"),
+        user_log := ft.TextField(label="Identifiant", width=320),
+        pass_log := ft.TextField(label="Mot de passe", width=320, password=True),
+        ft.ElevatedButton("ACCÉDER AU SYSTÈME", on_click=lambda _: tenter_connexion(), width=320, bgcolor=ft.Colors.INDIGO_600, color="white")
+    ], horizontal_alignment="center"), expand=True, alignment=ft.Alignment(0,0))
 
-    async def ouvrir_stats(e):
-        conn = sqlite3.connect("orientation_data.db")
-        stats = conn.execute("SELECT filiere, COUNT(*) FROM resultats GROUP BY filiere").fetchall(); conn.close()
-        tab = ft.DataTable(columns=[ft.DataColumn(ft.Text("Filière")), ft.DataColumn(ft.Text("Total"))], rows=[ft.DataRow(cells=[ft.DataCell(ft.Text(s[0])), ft.DataCell(ft.Text(str(s[1])))]) for s in stats])
-        page.overlay.append(ft.AlertDialog(title=ft.Text("📊 Statistiques"), content=tab, open=True)); page.update()
-
-    async def voir_base(e):
-        def actualiser():
-            conn = sqlite3.connect("orientation_data.db"); res = conn.execute("SELECT id, nom, filiere, score_sci FROM resultats ORDER BY nom ASC").fetchall(); conn.close()
-            tableau.rows = [ft.DataRow(cells=[ft.DataCell(ft.Text(str(i))), ft.DataCell(ft.Text(x[1])), ft.DataCell(ft.Text(x[2], weight="bold")), ft.DataCell(ft.Text(f"{round(x[3]*100, 1)}%")), ft.DataCell(ft.Row([ft.IconButton(ft.Icons.DELETE, icon_color="red", on_click=lambda _, r=x[0]: supprimer(r))]))]) for i, x in enumerate(res, start=1)]; page.update()
-        def supprimer(id_r):
-            conn = sqlite3.connect("orientation_data.db"); conn.execute("DELETE FROM resultats WHERE id=?", (id_r,)); conn.commit(); conn.close(); actualiser()
-        tableau = ft.DataTable(columns=[ft.DataColumn(ft.Text("N°")), ft.DataColumn(ft.Text("Nom")), ft.DataColumn(ft.Text("Conseil")), ft.DataColumn(ft.Text("IA %")), ft.DataColumn(ft.Text("Action"))])
-        actualiser(); page.overlay.append(ft.AlertDialog(title=ft.Text("📜 Historique"), content=ft.Column([tableau], scroll="always"), open=True)); page.update()
-
-    # --- ASSEMBLAGE UI ---
-    main_card = ft.Container(bgcolor=ft.Colors.BLUE_GREY_800, padding=35, border_radius=25, content=ft.Column([
-        nom_in, ft.Row([m_sci, m_lit], alignment="center"), rev_in, int_in, 
-        ft.Row([
-            ft.Button("ANALYSER", on_click=calculer, bgcolor=ft.Colors.INDIGO_500, color="white"), 
-            ft.Button("STATS", on_click=ouvrir_stats, bgcolor=ft.Colors.AMBER_700, color="white"), 
-            ft.Button("HISTO", on_click=voir_base, bgcolor=ft.Colors.BLUE_GREY_400, color="white"), 
-            ft.Button("IMPORTER", on_click=importer_texte, bgcolor=ft.Colors.GREEN_600, color="white")
-        ], alignment="center", spacing=10), 
-        ft.Row([
-            ft.TextButton("Exporter PDF", on_click=exporter_pdf_action), 
-            ft.TextButton("Exporter CSV", on_click=exporter_csv_action)
-        ], alignment="center")
-    ], horizontal_alignment="center"))
-    
-    res_container = ft.Container(bgcolor=ft.Colors.BLUE_GREY_800, padding=25, border_radius=25, content=ft.Column([ft.Text("📊 POIDS DÉCISIONNEL", weight="bold", size=14), xai_display], horizontal_alignment="center", spacing=15))
-
-    async def tenter_connexion(e):
+    async def tenter_connexion():
         if verifier_acces(user_log.value, pass_log.value):
             page.clean()
-            page.add(ft.Column([
-                ft.Container(gradient=ft.LinearGradient(colors=[ft.Colors.INDIGO_900, ft.Colors.GREEN_900]), padding=25, content=ft.Row([header_title, ft.IconButton(ft.Icons.LIGHT_MODE, on_click=changer_theme)], alignment="center")),
-                ft.Container(height=20), main_card, ft.Container(height=20),
-                ft.Row([ft.Column([res_final, conf_txt, prog_conf], horizontal_alignment="center", width=550), res_container], alignment="center")
-            ], scroll=ft.ScrollMode.ALWAYS))
-        else: notifier("🔒 Erreur", ft.Colors.RED)
+            page.add(
+                ft.AppBar(title=ft.Text("IA ORIENTATION - DASHBOARD MASTER"), bgcolor=ft.Colors.INDIGO_900),
+                ft.Column([
+                    ft.Container(height=20),
+                    ft.Container(bgcolor=ft.Colors.BLUE_GREY_800, padding=30, border_radius=20, content=ft.Column([
+                        nom_in, ft.Row([m_sci, m_lit], alignment="center"), rev_in, int_in,
+                        ft.Row([
+                            ft.ElevatedButton("ANALYSER", on_click=calculer, bgcolor=ft.Colors.GREEN_700, color="white"),
+                            ft.ElevatedButton("EXPORTER PDF", on_click=exporter_pdf_action, bgcolor=ft.Colors.RED_700, color="white"),
+                        ], alignment="center")
+                    ], horizontal_alignment="center")),
+                    ft.Container(height=20),
+                    ft.Column([res_final, conf_txt, prog_conf], horizontal_alignment="center"),
+                    ft.Container(padding=20, content=xai_display)
+                ], scroll=ft.ScrollMode.ALWAYS)
+            )
+        else: notifier("🔒 Accès refusé", ft.Colors.RED)
 
-    user_log = ft.TextField(label="Admin", width=320)
-    pass_log = ft.TextField(label="Code", width=320, password=True, on_submit=tenter_connexion)
-
-    page.add(ft.Container(content=ft.Column([ft.Icon(ft.Icons.LOCK, size=80), ft.Text("CONNEXION", size=24, weight="bold"), user_log, pass_log, ft.Button("OUVRIR", on_click=tenter_connexion, width=320)], horizontal_alignment="center"), alignment=ft.Alignment(0,0), expand=True))
+    page.add(login_card)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8550))
-    # CRITIQUE : assets_dir="assets" permet à Flet d'exposer les fichiers du dossier assets via URL
+    # CRUCIAL : assets_dir définit le dossier public pour les téléchargements
     ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port, host="0.0.0.0", assets_dir="assets")
