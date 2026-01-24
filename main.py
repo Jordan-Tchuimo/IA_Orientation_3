@@ -2,7 +2,6 @@ import flet as ft
 import sqlite3
 import datetime
 import csv
-import io
 import os
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
@@ -14,9 +13,9 @@ def init_db():
     conn.execute('''CREATE TABLE IF NOT EXISTS resultats (
         id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT, moy_sci REAL, moy_lit REAL, 
         revenu TEXT, interet TEXT, score_sci REAL, score_lit REAL, filiere TEXT, 
-        date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''') [cite: 1]
     conn.execute('''CREATE TABLE IF NOT EXISTS conseillers (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT)''')
+        id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT)''') [cite: 1]
     try:
         conn.execute("INSERT INTO conseillers (username, password) VALUES (?, ?)", ("admin", "1234"))
     except: pass
@@ -27,9 +26,9 @@ def verifier_acces(user, pwd):
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM conseillers WHERE username=? AND password=?", (user, pwd))
     res = cursor.fetchone(); conn.close()
-    return res is not None
+    return res is not None [cite: 1]
 
-# --- 2. EXPORTATIONS ---
+# --- 2. EXPORTATIONS (CORRIGÉES POUR LE WEB) ---
 def generer_csv_base():
     conn = sqlite3.connect("orientation_data.db"); cursor = conn.cursor()
     cursor.execute("SELECT nom, moy_sci, moy_lit, revenu, interet, score_sci, filiere, date FROM resultats ORDER BY nom ASC")
@@ -37,6 +36,7 @@ def generer_csv_base():
     if not donnees: return "Base vide"
     
     nom_f = f"Export_{datetime.datetime.now().strftime('%M%S')}.csv"
+    # Important : On écrit dans 'assets/' pour que Flet puisse servir le fichier
     chemin = os.path.join("assets", nom_f)
     
     with open(chemin, 'w', newline='', encoding='utf-8-sig') as f:
@@ -46,7 +46,7 @@ def generer_csv_base():
             ligne = [index] + list(r)
             ligne[6] = f"{round(ligne[6] * 100, 1)}%" 
             writer.writerow(ligne)
-    return nom_f
+    return nom_f [cite: 1]
 
 def generer_pdf_complet():
     nom_f = f"Rapport_{datetime.datetime.now().strftime('%M%S')}.pdf"
@@ -65,13 +65,15 @@ def generer_pdf_complet():
     for i, r in enumerate(donnees, start=1):
         pdf.cell(10, 8, str(i), border=1); pdf.cell(50, 8, str(r[0]), border=1); pdf.cell(15, 8, str(r[1]), border=1); pdf.cell(15, 8, str(r[2]), border=1); pdf.cell(60, 8, str(r[3]), border=1); pdf.cell(20, 8, f"{round(r[4]*100, 1)}%", border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.output(chemin)
-    return nom_f
+    return nom_f [cite: 1]
 
 # --- 3. INTERFACE PRINCIPALE ---
 async def main(page: ft.Page):
-    if not os.path.exists("assets"): os.makedirs("assets")
+    # Création du dossier assets si inexistant au démarrage
+    if not os.path.exists("assets"): 
+        os.makedirs("assets") [cite: 1]
 
-    init_db(); moteur = MoteurOrientation(); moteur.entrainer_automatique()
+    init_db(); moteur = MoteurOrientation(); moteur.entrainer_automatique() [cite: 1]
     page.title = "IA Orientation - Master 2026"
     page.theme_mode = ft.ThemeMode.DARK
     page.scroll = ft.ScrollMode.ALWAYS 
@@ -79,31 +81,28 @@ async def main(page: ft.Page):
     def notifier(m, c=ft.Colors.BLUE):
         page.overlay.append(ft.SnackBar(ft.Text(m, weight="bold"), bgcolor=c, open=True)); page.update()
 
-    # --- ACTIONS D'EXPORTATION (FIX OUVERTURE) ---
     async def exporter_pdf_action(e):
         nom_fichier = generer_pdf_complet()
         if nom_fichier != "Base vide":
-            # web_window_name="_blank" est indispensable pour ouvrir sans déconnecter
-            page.launch_url(f"/{nom_fichier}", web_window_name="_blank")
-            notifier(f"📥 Ouverture du PDF : {nom_fichier}", ft.Colors.GREEN)
+            # Correction cruciale : Appel de l'URL relative servie par le dossier assets
+            page.launch_url(f"/{nom_fichier}") 
+            notifier(f"📥 Téléchargement PDF : {nom_fichier}", ft.Colors.GREEN)
         else: notifier("❌ La base est vide", ft.Colors.RED)
 
     async def exporter_csv_action(e):
         nom_fichier = generer_csv_base()
         if nom_fichier != "Base vide":
-            page.launch_url(f"/{nom_fichier}", web_window_name="_blank")
-            notifier(f"📥 Ouverture du CSV : {nom_fichier}", ft.Colors.GREEN)
+            # Correction cruciale : Appel de l'URL relative servie par le dossier assets
+            page.launch_url(f"/{nom_fichier}")
+            notifier(f"📥 Téléchargement CSV : {nom_fichier}", ft.Colors.GREEN)
         else: notifier("❌ La base est vide", ft.Colors.RED)
 
-    # Fonction Import (Pour éviter l'erreur si tu cliques sur le bouton)
     async def importer_texte(e):
         notifier("Fonction d'importation prête", ft.Colors.AMBER)
 
     # --- COMPOSANTS UI ---
     header_title = ft.Text("IA ORIENTATION SYSTEM", color=ft.Colors.LIGHT_GREEN_400, size=26, weight="bold")
     nom_in = ft.TextField(label="Nom de l'élève", width=450, border_radius=15)
-    
-    # Correction pour les décimaux et la plage 0-20
     m_sci = ft.TextField(label="Moyenne Scientifique (0-20)", width=220, border_radius=15)
     m_lit = ft.TextField(label="Moyenne Littéraire (0-20)", width=220, border_radius=15)
     
@@ -122,21 +121,18 @@ async def main(page: ft.Page):
     prog_conf = ft.ProgressBar(width=400, value=0, visible=False, color=ft.Colors.LIGHT_GREEN_400)
     xai_display = ft.Column(visible=False, horizontal_alignment="center", width=380, spacing=10)
 
-    # --- LOGIQUE CALCUL ---
     async def calculer(e):
         try:
-            # Remplacement de la virgule par le point pour les calculs
             v_sci = m_sci.value.strip().replace(",", ".")
             v_lit = m_lit.value.strip().replace(",", ".")
             sv = float(v_sci)
             lv = float(v_lit)
             
-            # Validation de la plage 0-20
             if not (0 <= sv <= 20 and 0 <= lv <= 20):
                 notifier("❌ Les notes doivent être entre 0 et 20", ft.Colors.RED)
                 return
 
-            filiere, conf = moteur.predire_avec_probabilite(sv, lv, rev_in.value, int_in.value)
+            filiere, conf = moteur.predire_avec_probabilite(sv, lv, rev_in.value, int_in.value) [cite: 1]
             res_final.value = f"CONSEIL IA : {filiere}"; conf_txt.value = f"Confiance IA : {round(conf*100, 2)}%"
             prog_conf.value = conf; prog_conf.visible = True
             
@@ -153,7 +149,9 @@ async def main(page: ft.Page):
             ]
             xai_display.visible = True
             
-            conn = sqlite3.connect("orientation_data.db"); conn.execute("INSERT INTO resultats (nom, moy_sci, moy_lit, revenu, interet, score_sci, score_lit, filiere) VALUES (?,?,?,?,?,?,?,?)", (nom_in.value.upper(), sv, lv, rev_in.value, int_in.value, conf, 0.0, filiere)); conn.commit(); conn.close()
+            conn = sqlite3.connect("orientation_data.db")
+            conn.execute("INSERT INTO resultats (nom, moy_sci, moy_lit, revenu, interet, score_sci, score_lit, filiere) VALUES (?,?,?,?,?,?,?,?)", (nom_in.value.upper(), sv, lv, rev_in.value, int_in.value, conf, 0.0, filiere))
+            conn.commit(); conn.close() [cite: 1]
             notifier("✅ Analyse terminée", ft.Colors.GREEN); page.update()
         except: notifier("❌ Entrez des nombres valides (ex: 15.5)", ft.Colors.RED)
 
@@ -176,7 +174,6 @@ async def main(page: ft.Page):
         tableau = ft.DataTable(columns=[ft.DataColumn(ft.Text("N°")), ft.DataColumn(ft.Text("Nom")), ft.DataColumn(ft.Text("Conseil")), ft.DataColumn(ft.Text("IA %")), ft.DataColumn(ft.Text("Action"))])
         actualiser(); page.overlay.append(ft.AlertDialog(title=ft.Text("📜 Historique"), content=ft.Column([tableau], scroll="always"), open=True)); page.update()
 
-    # --- ASSEMBLAGE UI ---
     main_card = ft.Container(bgcolor=ft.Colors.BLUE_GREY_800, padding=35, border_radius=25, content=ft.Column([
         nom_in, ft.Row([m_sci, m_lit], alignment="center"), rev_in, int_in, 
         ft.Row([
@@ -201,7 +198,7 @@ async def main(page: ft.Page):
                 ft.Container(height=20), main_card, ft.Container(height=20),
                 ft.Row([ft.Column([res_final, conf_txt, prog_conf], horizontal_alignment="center", width=550), res_container], alignment="center")
             ], scroll=ft.ScrollMode.ALWAYS))
-            page.update() # Rafraîchissement indispensable pour Render
+            page.update()
         else: notifier("🔒 Erreur", ft.Colors.RED)
 
     user_log = ft.TextField(label="Admin", width=320)
@@ -211,4 +208,5 @@ async def main(page: ft.Page):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8550))
-    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port, host="0.0.0.0", assets_dir="assets")
+    # assets_dir="assets" est indispensable pour que flet expose les fichiers au navigateur
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port, host="0.0.0.0", assets_dir="assets") [cite: 1]
