@@ -28,7 +28,7 @@ def verifier_acces(user, pwd):
     res = cursor.fetchone(); conn.close()
     return res is not None
 
-# --- 2. EXPORTATIONS (VERSION WEB OPTIMISÉE) ---
+# --- 2. EXPORTATIONS ---
 def generer_csv_base():
     conn = sqlite3.connect("orientation_data.db"); cursor = conn.cursor()
     cursor.execute("SELECT nom, moy_sci, moy_lit, revenu, interet, score_sci, filiere, date FROM resultats ORDER BY nom ASC")
@@ -78,23 +78,26 @@ async def main(page: ft.Page):
     def notifier(m, c=ft.Colors.BLUE):
         page.overlay.append(ft.SnackBar(ft.Text(m, weight="bold"), bgcolor=c, open=True)); page.update()
 
+    # --- ACTIONS D'EXPORTATION ---
     async def exporter_pdf_action(e):
         nom_fichier = generer_pdf_complet()
         if nom_fichier != "Base vide":
+            # On utilise une URL directe. Si ça ne télécharge pas, vérifiez les popups du navigateur
             page.launch_url(f"/{nom_fichier}")
-            notifier(f"📥 Téléchargement PDF : {nom_fichier}", ft.Colors.GREEN)
+            notifier(f"📥 PDF généré : {nom_fichier}. Vérifiez vos téléchargements.", ft.Colors.GREEN)
         else: notifier("❌ La base est vide", ft.Colors.RED)
 
     async def exporter_csv_action(e):
         nom_fichier = generer_csv_base()
         if nom_fichier != "Base vide":
             page.launch_url(f"/{nom_fichier}")
-            notifier(f"📥 Téléchargement CSV : {nom_fichier}", ft.Colors.GREEN)
+            notifier(f"📥 CSV généré : {nom_fichier}. Vérifiez vos téléchargements.", ft.Colors.GREEN)
         else: notifier("❌ La base est vide", ft.Colors.RED)
 
     async def importer_texte(e):
         notifier("Fonction d'importation prête", ft.Colors.AMBER)
 
+    # --- UI COMPONENTS ---
     header_title = ft.Text("IA ORIENTATION SYSTEM", color=ft.Colors.LIGHT_GREEN_400, size=26, weight="bold")
     nom_in = ft.TextField(label="Nom de l'élève", width=450, border_radius=15)
     m_sci = ft.TextField(label="Moyenne Scientifique (0-20)", width=220, border_radius=15)
@@ -147,7 +150,7 @@ async def main(page: ft.Page):
             conn.execute("INSERT INTO resultats (nom, moy_sci, moy_lit, revenu, interet, score_sci, score_lit, filiere) VALUES (?,?,?,?,?,?,?,?)", (nom_in.value.upper(), sv, lv, rev_in.value, int_in.value, conf, 0.0, filiere))
             conn.commit(); conn.close()
             notifier("✅ Analyse terminée", ft.Colors.GREEN); page.update()
-        except: notifier("❌ Entrez des nombres valides (ex: 15.5)", ft.Colors.RED)
+        except Exception: notifier("❌ Entrez des nombres valides (ex: 15.5)", ft.Colors.RED)
 
     async def changer_theme(e):
         page.theme_mode = ft.ThemeMode.LIGHT if page.theme_mode == ft.ThemeMode.DARK else ft.ThemeMode.DARK
@@ -159,15 +162,41 @@ async def main(page: ft.Page):
         tab = ft.DataTable(columns=[ft.DataColumn(ft.Text("Filière")), ft.DataColumn(ft.Text("Total"))], rows=[ft.DataRow(cells=[ft.DataCell(ft.Text(s[0])), ft.DataCell(ft.Text(str(s[1])))]) for s in stats])
         page.overlay.append(ft.AlertDialog(title=ft.Text("📊 Statistiques"), content=tab, open=True)); page.update()
 
+    # --- HISTORIQUE AVEC FONCTION SUPPRIMER (RÉTABLIE) ---
     async def voir_base(e):
         def actualiser():
-            conn = sqlite3.connect("orientation_data.db"); res = conn.execute("SELECT id, nom, filiere, score_sci FROM resultats ORDER BY nom ASC").fetchall(); conn.close()
-            tableau.rows = [ft.DataRow(cells=[ft.DataCell(ft.Text(str(i))), ft.DataCell(ft.Text(x[1])), ft.DataCell(ft.Text(x[2], weight="bold")), ft.DataCell(ft.Text(f"{round(x[3]*100, 1)}%")), ft.DataCell(ft.Row([ft.IconButton(ft.Icons.DELETE, icon_color="red", on_click=lambda _, r=x[0]: supprimer(r))]))]) for i, x in enumerate(res, start=1)]; page.update()
-        def supprimer(id_r):
-            conn = sqlite3.connect("orientation_data.db"); conn.execute("DELETE FROM resultats WHERE id=?", (id_r,)); conn.commit(); conn.close(); actualiser()
-        tableau = ft.DataTable(columns=[ft.DataColumn(ft.Text("N°")), ft.DataColumn(ft.Text("Nom")), ft.DataColumn(ft.Text("Conseil")), ft.DataColumn(ft.Text("IA %")), ft.DataColumn(ft.Text("Action"))])
-        actualiser(); page.overlay.append(ft.AlertDialog(title=ft.Text("📜 Historique"), content=ft.Column([tableau], scroll="always"), open=True)); page.update()
+            conn = sqlite3.connect("orientation_data.db")
+            res = conn.execute("SELECT id, nom, filiere, score_sci FROM resultats ORDER BY nom ASC").fetchall()
+            conn.close()
+            tableau.rows = [
+                ft.DataRow(cells=[
+                    ft.DataCell(ft.Text(str(i))),
+                    ft.DataCell(ft.Text(x[1])),
+                    ft.DataCell(ft.Text(x[2], weight="bold")),
+                    ft.DataCell(ft.Text(f"{round(x[3]*100, 1)}%")),
+                    ft.DataCell(ft.Row([
+                        ft.IconButton(ft.Icons.DELETE, icon_color="red", on_click=lambda _, r=x[0]: supprimer(r))
+                    ]))
+                ]) for i, x in enumerate(res, start=1)
+            ]
+            page.update()
 
+        def supprimer(id_r):
+            conn = sqlite3.connect("orientation_data.db")
+            conn.execute("DELETE FROM resultats WHERE id=?", (id_r,))
+            conn.commit(); conn.close()
+            actualiser()
+
+        tableau = ft.DataTable(columns=[
+            ft.DataColumn(ft.Text("N°")), ft.DataColumn(ft.Text("Nom")), 
+            ft.DataColumn(ft.Text("Conseil")), ft.DataColumn(ft.Text("IA %")), 
+            ft.DataColumn(ft.Text("Action"))
+        ])
+        actualiser()
+        page.overlay.append(ft.AlertDialog(title=ft.Text("📜 Historique"), content=ft.Column([tableau], scroll="always"), open=True))
+        page.update()
+
+    # --- ASSEMBLAGE ---
     main_card = ft.Container(bgcolor=ft.Colors.BLUE_GREY_800, padding=35, border_radius=25, content=ft.Column([
         nom_in, ft.Row([m_sci, m_lit], alignment="center"), rev_in, int_in, 
         ft.Row([
@@ -193,7 +222,7 @@ async def main(page: ft.Page):
                 ft.Row([ft.Column([res_final, conf_txt, prog_conf], horizontal_alignment="center", width=550), res_container], alignment="center")
             ], scroll=ft.ScrollMode.ALWAYS))
             page.update()
-        else: notifier("🔒 Erreur", ft.Colors.RED)
+        else: notifier("🔒 Erreur d'accès", ft.Colors.RED)
 
     user_log = ft.TextField(label="Admin", width=320)
     pass_log = ft.TextField(label="Code", width=320, password=True, on_submit=tenter_connexion)
@@ -202,4 +231,5 @@ async def main(page: ft.Page):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8550))
+    # Crucial pour Render/Hébergement : assets_dir définit le dossier public
     ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port, host="0.0.0.0", assets_dir="assets")
