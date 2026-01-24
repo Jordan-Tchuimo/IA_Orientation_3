@@ -28,7 +28,7 @@ def verifier_acces(user, pwd):
     res = cursor.fetchone(); conn.close()
     return res is not None
 
-# --- 2. EXPORTATIONS ---
+# --- 2. EXPORTATIONS (CORRIGÉES POUR SERVEUR) ---
 def generer_csv_base():
     conn = sqlite3.connect("orientation_data.db"); cursor = conn.cursor()
     cursor.execute("SELECT nom, moy_sci, moy_lit, revenu, interet, score_sci, filiere, date FROM resultats ORDER BY nom ASC")
@@ -78,26 +78,24 @@ async def main(page: ft.Page):
     def notifier(m, c=ft.Colors.BLUE):
         page.overlay.append(ft.SnackBar(ft.Text(m, weight="bold"), bgcolor=c, open=True)); page.update()
 
-    # --- ACTIONS D'EXPORTATION ---
     async def exporter_pdf_action(e):
         nom_fichier = generer_pdf_complet()
         if nom_fichier != "Base vide":
-            # On utilise une URL directe. Si ça ne télécharge pas, vérifiez les popups du navigateur
-            page.launch_url(f"/{nom_fichier}")
-            notifier(f"📥 PDF généré : {nom_fichier}. Vérifiez vos téléchargements.", ft.Colors.GREEN)
+            # web_window_name="_blank" force le téléchargement dans un nouvel onglet
+            page.launch_url(f"/{nom_fichier}", web_window_name="_blank")
+            notifier(f"📥 Ouverture du PDF : {nom_fichier}", ft.Colors.GREEN)
         else: notifier("❌ La base est vide", ft.Colors.RED)
 
     async def exporter_csv_action(e):
         nom_fichier = generer_csv_base()
         if nom_fichier != "Base vide":
-            page.launch_url(f"/{nom_fichier}")
-            notifier(f"📥 CSV généré : {nom_fichier}. Vérifiez vos téléchargements.", ft.Colors.GREEN)
+            page.launch_url(f"/{nom_fichier}", web_window_name="_blank")
+            notifier(f"📥 Ouverture du CSV : {nom_fichier}", ft.Colors.GREEN)
         else: notifier("❌ La base est vide", ft.Colors.RED)
 
     async def importer_texte(e):
         notifier("Fonction d'importation prête", ft.Colors.AMBER)
 
-    # --- UI COMPONENTS ---
     header_title = ft.Text("IA ORIENTATION SYSTEM", color=ft.Colors.LIGHT_GREEN_400, size=26, weight="bold")
     nom_in = ft.TextField(label="Nom de l'élève", width=450, border_radius=15)
     m_sci = ft.TextField(label="Moyenne Scientifique (0-20)", width=220, border_radius=15)
@@ -130,14 +128,12 @@ async def main(page: ft.Page):
                 return
 
             filiere, conf = moteur.predire_avec_probabilite(sv, lv, rev_in.value, int_in.value)
-            res_final.value = f"CONSEIL IA : {filiere}"; conf_txt.value = f"Confiance IA : {round(conf*100, 2)}%"
+            res_final.value = f"IA CONSEIL : {filiere}"; conf_txt.value = f"Confiance : {round(conf*100, 2)}%"
             prog_conf.value = conf; prog_conf.visible = True
             
-            p_notes = (sv + lv) * 2
-            p_social = 35 if rev_in.value != "Tranche_A" else 15
-            p_perso = 25
-            tot = p_notes + p_social + p_perso
-            pn = [p_notes/tot, p_social/tot, p_perso/tot]
+            # XAI Simulé
+            p_notes = (sv + lv) * 2; p_social = 35 if rev_in.value != "Tranche_A" else 15; p_perso = 25
+            tot = p_notes + p_social + p_perso; pn = [p_notes/tot, p_social/tot, p_perso/tot]
             
             xai_display.controls = [
                 ft.Row([ft.Text("Scolaire", width=90), ft.ProgressBar(value=pn[0], color="blue", width=180), ft.Text(f"{round(pn[0]*100)}%")], alignment="center"),
@@ -150,33 +146,19 @@ async def main(page: ft.Page):
             conn.execute("INSERT INTO resultats (nom, moy_sci, moy_lit, revenu, interet, score_sci, score_lit, filiere) VALUES (?,?,?,?,?,?,?,?)", (nom_in.value.upper(), sv, lv, rev_in.value, int_in.value, conf, 0.0, filiere))
             conn.commit(); conn.close()
             notifier("✅ Analyse terminée", ft.Colors.GREEN); page.update()
-        except Exception: notifier("❌ Entrez des nombres valides (ex: 15.5)", ft.Colors.RED)
+        except Exception: notifier("❌ Erreur de saisie", ft.Colors.RED)
 
-    async def changer_theme(e):
-        page.theme_mode = ft.ThemeMode.LIGHT if page.theme_mode == ft.ThemeMode.DARK else ft.ThemeMode.DARK
-        page.update()
-
-    async def ouvrir_stats(e):
-        conn = sqlite3.connect("orientation_data.db")
-        stats = conn.execute("SELECT filiere, COUNT(*) FROM resultats GROUP BY filiere").fetchall(); conn.close()
-        tab = ft.DataTable(columns=[ft.DataColumn(ft.Text("Filière")), ft.DataColumn(ft.Text("Total"))], rows=[ft.DataRow(cells=[ft.DataCell(ft.Text(s[0])), ft.DataCell(ft.Text(str(s[1])))]) for s in stats])
-        page.overlay.append(ft.AlertDialog(title=ft.Text("📊 Statistiques"), content=tab, open=True)); page.update()
-
-    # --- HISTORIQUE AVEC FONCTION SUPPRIMER (RÉTABLIE) ---
     async def voir_base(e):
         def actualiser():
             conn = sqlite3.connect("orientation_data.db")
-            res = conn.execute("SELECT id, nom, filiere, score_sci FROM resultats ORDER BY nom ASC").fetchall()
-            conn.close()
+            res = conn.execute("SELECT id, nom, filiere, score_sci FROM resultats ORDER BY nom ASC").fetchall(); conn.close()
             tableau.rows = [
                 ft.DataRow(cells=[
                     ft.DataCell(ft.Text(str(i))),
                     ft.DataCell(ft.Text(x[1])),
                     ft.DataCell(ft.Text(x[2], weight="bold")),
                     ft.DataCell(ft.Text(f"{round(x[3]*100, 1)}%")),
-                    ft.DataCell(ft.Row([
-                        ft.IconButton(ft.Icons.DELETE, icon_color="red", on_click=lambda _, r=x[0]: supprimer(r))
-                    ]))
+                    ft.DataCell(ft.IconButton(ft.Icons.DELETE, icon_color="red", on_click=lambda _, r=x[0]: supprimer(r)))
                 ]) for i, x in enumerate(res, start=1)
             ]
             page.update()
@@ -184,8 +166,7 @@ async def main(page: ft.Page):
         def supprimer(id_r):
             conn = sqlite3.connect("orientation_data.db")
             conn.execute("DELETE FROM resultats WHERE id=?", (id_r,))
-            conn.commit(); conn.close()
-            actualiser()
+            conn.commit(); conn.close(); actualiser()
 
         tableau = ft.DataTable(columns=[
             ft.DataColumn(ft.Text("N°")), ft.DataColumn(ft.Text("Nom")), 
@@ -196,7 +177,13 @@ async def main(page: ft.Page):
         page.overlay.append(ft.AlertDialog(title=ft.Text("📜 Historique"), content=ft.Column([tableau], scroll="always"), open=True))
         page.update()
 
-    # --- ASSEMBLAGE ---
+    async def ouvrir_stats(e):
+        conn = sqlite3.connect("orientation_data.db")
+        stats = conn.execute("SELECT filiere, COUNT(*) FROM resultats GROUP BY filiere").fetchall(); conn.close()
+        tab = ft.DataTable(columns=[ft.DataColumn(ft.Text("Filière")), ft.DataColumn(ft.Text("Total"))], rows=[ft.DataRow(cells=[ft.DataCell(ft.Text(s[0])), ft.DataCell(ft.Text(str(s[1])))]) for s in stats])
+        page.overlay.append(ft.AlertDialog(title=ft.Text("📊 Statistiques"), content=tab, open=True)); page.update()
+
+    # --- UI LAYOUT ---
     main_card = ft.Container(bgcolor=ft.Colors.BLUE_GREY_800, padding=35, border_radius=25, content=ft.Column([
         nom_in, ft.Row([m_sci, m_lit], alignment="center"), rev_in, int_in, 
         ft.Row([
@@ -217,19 +204,16 @@ async def main(page: ft.Page):
         if verifier_acces(user_log.value, pass_log.value):
             page.clean()
             page.add(ft.Column([
-                ft.Container(gradient=ft.LinearGradient(colors=[ft.Colors.INDIGO_900, ft.Colors.GREEN_900]), padding=25, content=ft.Row([header_title, ft.IconButton(ft.Icons.LIGHT_MODE, on_click=changer_theme)], alignment="center")),
+                ft.Container(gradient=ft.LinearGradient(colors=[ft.Colors.INDIGO_900, ft.Colors.GREEN_900]), padding=25, content=ft.Row([header_title, ft.IconButton(ft.Icons.LIGHT_MODE, on_click=lambda _: None)], alignment="center")),
                 ft.Container(height=20), main_card, ft.Container(height=20),
                 ft.Row([ft.Column([res_final, conf_txt, prog_conf], horizontal_alignment="center", width=550), res_container], alignment="center")
             ], scroll=ft.ScrollMode.ALWAYS))
             page.update()
-        else: notifier("🔒 Erreur d'accès", ft.Colors.RED)
+        else: notifier("🔒 Code erroné", ft.Colors.RED)
 
-    user_log = ft.TextField(label="Admin", width=320)
-    pass_log = ft.TextField(label="Code", width=320, password=True, on_submit=tenter_connexion)
-
+    user_log = ft.TextField(label="Admin", width=320); pass_log = ft.TextField(label="Code", width=320, password=True, on_submit=tenter_connexion)
     page.add(ft.Container(content=ft.Column([ft.Icon(ft.Icons.LOCK, size=80), ft.Text("CONNEXION", size=24, weight="bold"), user_log, pass_log, ft.Button("OUVRIR", on_click=tenter_connexion, width=320)], horizontal_alignment="center"), alignment=ft.Alignment(0,0), expand=True))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8550))
-    # Crucial pour Render/Hébergement : assets_dir définit le dossier public
     ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port, host="0.0.0.0", assets_dir="assets")
