@@ -81,73 +81,19 @@ async def main(page: ft.Page):
     async def exporter_pdf_action(e):
         nom_fichier = generer_pdf_complet()
         if nom_fichier != "Base vide":
-            # Correction de l'argument ici : web_popup_window_name
+            # Correction de l'argument et du chemin
             page.launch_url(f"/{nom_fichier}", web_popup_window_name="_blank")
-            notifier(f"📥 Ouverture du PDF : {nom_fichier}", ft.Colors.GREEN)
+            notifier(f"📥 Export PDF : {nom_fichier}", ft.Colors.GREEN)
         else: notifier("❌ La base est vide", ft.Colors.RED)
 
     async def exporter_csv_action(e):
         nom_fichier = generer_csv_base()
         if nom_fichier != "Base vide":
             page.launch_url(f"/{nom_fichier}", web_popup_window_name="_blank")
-            notifier(f"📥 Ouverture du CSV : {nom_fichier}", ft.Colors.GREEN)
+            notifier(f"📥 Export CSV : {nom_fichier}", ft.Colors.GREEN)
         else: notifier("❌ La base est vide", ft.Colors.RED)
 
-    async def importer_texte(e):
-        notifier("Fonction d'importation prête", ft.Colors.AMBER)
-
-    header_title = ft.Text("IA ORIENTATION SYSTEM", color=ft.Colors.LIGHT_GREEN_400, size=26, weight="bold")
-    nom_in = ft.TextField(label="Nom de l'élève", width=450, border_radius=15)
-    m_sci = ft.TextField(label="Moyenne Scientifique (0-20)", width=220, border_radius=15)
-    m_lit = ft.TextField(label="Moyenne Littéraire (0-20)", width=220, border_radius=15)
-    
-    rev_in = ft.Dropdown(label="Revenu familial mensuel", width=450, border_radius=15, options=[
-        ft.dropdown.Option(key="Tranche_A", text="Tranche A : [0 - 150 000 FCFA]"),
-        ft.dropdown.Option(key="Tranche_B", text="Tranche B : [150 000 - 450 000 FCFA]"),
-        ft.dropdown.Option(key="Tranche_C", text="Tranche C : [+ de 450 000 FCFA]")
-    ])
-    int_in = ft.Dropdown(label="Centre d'intérêt", width=450, border_radius=15, options=[
-        ft.dropdown.Option(key="Sciences_Tech", text="Sciences & Technologie"),
-        ft.dropdown.Option(key="Arts_Creativite", text="Arts & Créativité")
-    ])
-
-    res_final = ft.Text("Prêt", size=24, weight="bold", color=ft.Colors.LIGHT_GREEN_400)
-    conf_txt = ft.Text("", italic=True, size=18, weight="bold")
-    prog_conf = ft.ProgressBar(width=400, value=0, visible=False, color=ft.Colors.LIGHT_GREEN_400)
-    xai_display = ft.Column(visible=False, horizontal_alignment="center", width=380, spacing=10)
-
-    async def calculer(e):
-        try:
-            v_sci = m_sci.value.strip().replace(",", ".")
-            v_lit = m_lit.value.strip().replace(",", ".")
-            sv = float(v_sci)
-            lv = float(v_lit)
-            
-            if not (0 <= sv <= 20 and 0 <= lv <= 20):
-                notifier("❌ Les notes doivent être entre 0 et 20", ft.Colors.RED)
-                return
-
-            filiere, conf = moteur.predire_avec_probabilite(sv, lv, rev_in.value, int_in.value)
-            res_final.value = f"CONSEIL IA : {filiere}"; conf_txt.value = f"IA Confiance : {round(conf*100, 2)}%"
-            prog_conf.value = conf; prog_conf.visible = True
-            
-            p_notes = (sv + lv) * 2; p_social = 35 if rev_in.value != "Tranche_A" else 15; p_perso = 25
-            tot = p_notes + p_social + p_perso; pn = [p_notes/tot, p_social/tot, p_perso/tot]
-            
-            xai_display.controls = [
-                ft.Row([ft.Text("Scolaire", width=90), ft.ProgressBar(value=pn[0], color="blue", width=180), ft.Text(f"{round(pn[0]*100)}%")], alignment="center"),
-                ft.Row([ft.Text("Social", width=90), ft.ProgressBar(value=pn[1], color="orange", width=180), ft.Text(f"{round(pn[1]*100)}%")], alignment="center"),
-                ft.Row([ft.Text("Intérêt", width=90), ft.ProgressBar(value=pn[2], color="green", width=180), ft.Text(f"{round(pn[2]*100)}%")], alignment="center")
-            ]
-            xai_display.visible = True
-            
-            conn = sqlite3.connect("orientation_data.db")
-            conn.execute("INSERT INTO resultats (nom, moy_sci, moy_lit, revenu, interet, score_sci, score_lit, filiere) VALUES (?,?,?,?,?,?,?,?)", (nom_in.value.upper(), sv, lv, rev_in.value, int_in.value, conf, 0.0, filiere))
-            conn.commit(); conn.close()
-            notifier("✅ Analyse terminée", ft.Colors.GREEN); page.update()
-        except: notifier("❌ Erreur de saisie", ft.Colors.RED)
-
-    # --- HISTORIQUE AVEC POUBELLE RÉTABLIE ---
+    # --- HISTORIQUE AVEC BOUTON SUPPRIMER ---
     async def voir_base(e):
         def actualiser():
             conn = sqlite3.connect("orientation_data.db")
@@ -167,7 +113,8 @@ async def main(page: ft.Page):
         def supprimer(id_r):
             conn = sqlite3.connect("orientation_data.db")
             conn.execute("DELETE FROM resultats WHERE id=?", (id_r,))
-            conn.commit(); conn.close(); actualiser()
+            conn.commit(); conn.close()
+            actualiser()
 
         tableau = ft.DataTable(columns=[
             ft.DataColumn(ft.Text("N°")), ft.DataColumn(ft.Text("Nom")), 
@@ -178,43 +125,60 @@ async def main(page: ft.Page):
         page.overlay.append(ft.AlertDialog(title=ft.Text("📜 Historique"), content=ft.Column([tableau], scroll="always"), open=True))
         page.update()
 
-    async def ouvrir_stats(e):
-        conn = sqlite3.connect("orientation_data.db")
-        stats = conn.execute("SELECT filiere, COUNT(*) FROM resultats GROUP BY filiere").fetchall(); conn.close()
-        tab = ft.DataTable(columns=[ft.DataColumn(ft.Text("Filière")), ft.DataColumn(ft.Text("Total"))], rows=[ft.DataRow(cells=[ft.DataCell(ft.Text(s[0])), ft.DataCell(ft.Text(str(s[1])))]) for s in stats])
-        page.overlay.append(ft.AlertDialog(title=ft.Text("📊 Statistiques"), content=tab, open=True)); page.update()
+    async def calculer(e):
+        try:
+            v_sci = m_sci.value.strip().replace(",", "."); v_lit = m_lit.value.strip().replace(",", ".")
+            sv, lv = float(v_sci), float(v_lit)
+            if not (0 <= sv <= 20 and 0 <= lv <= 20):
+                notifier("❌ Notes entre 0 et 20", ft.Colors.RED); return
 
-    # --- LAYOUT ---
+            filiere, conf = moteur.predire_avec_probabilite(sv, lv, rev_in.value, int_in.value)
+            res_final.value = f"CONSEIL IA : {filiere}"; conf_txt.value = f"IA Confiance : {round(conf*100, 2)}%"
+            prog_conf.value = conf; prog_conf.visible = True
+            
+            p_notes = (sv + lv) * 2; p_social = 35 if rev_in.value != "Tranche_A" else 15; p_perso = 25
+            tot = p_notes + p_social + p_perso; pn = [p_notes/tot, p_social/tot, p_perso/tot]
+            
+            xai_display.controls = [
+                ft.Row([ft.Text("Scolaire", width=90), ft.ProgressBar(value=pn[0], color="blue", width=180), ft.Text(f"{round(pn[0]*100)}%")], alignment="center"),
+                ft.Row([ft.Text("Social", width=90), ft.ProgressBar(value=pn[1], color="orange", width=180), ft.Text(f"{round(pn[1]*100)}%")], alignment="center"),
+                ft.Row([ft.Text("Intérêt", width=90), ft.ProgressBar(value=pn[2], color="green", width=180), ft.Text(f"{round(pn[2]*100)}%")], alignment="center")
+            ]
+            xai_display.visible = True
+            
+            conn = sqlite3.connect("orientation_data.db")
+            conn.execute("INSERT INTO resultats (nom, moy_sci, moy_lit, revenu, interet, score_sci, score_lit, filiere) VALUES (?,?,?,?,?,?,?,?)", (nom_in.value.upper(), sv, lv, rev_in.value, int_in.value, conf, 0.0, filiere))
+            conn.commit(); conn.close(); notifier("✅ Analyse terminée", ft.Colors.GREEN); page.update()
+        except: notifier("❌ Entrée invalide", ft.Colors.RED)
+
+    # --- UI LAYOUT ---
+    header_title = ft.Text("IA ORIENTATION SYSTEM", color=ft.Colors.LIGHT_GREEN_400, size=26, weight="bold")
+    nom_in = ft.TextField(label="Nom de l'élève", width=450, border_radius=15)
+    m_sci = ft.TextField(label="Moyenne Scientifique (0-20)", width=220, border_radius=15)
+    m_lit = ft.TextField(label="Moyenne Littéraire (0-20)", width=220, border_radius=15)
+    rev_in = ft.Dropdown(label="Revenu familial", width=450, border_radius=15, options=[ft.dropdown.Option(key="Tranche_A", text="0 - 150k"), ft.dropdown.Option(key="Tranche_B", text="150k - 450k"), ft.dropdown.Option(key="Tranche_C", text="+ 450k")])
+    int_in = ft.Dropdown(label="Intérêt", width=450, border_radius=15, options=[ft.dropdown.Option(key="Sciences_Tech", text="Sciences"), ft.dropdown.Option(key="Arts_Creativite", text="Arts")])
+
+    res_final = ft.Text("Prêt", size=24, weight="bold", color=ft.Colors.LIGHT_GREEN_400)
+    conf_txt = ft.Text("", italic=True, size=18, weight="bold")
+    prog_conf = ft.ProgressBar(width=400, value=0, visible=False, color=ft.Colors.LIGHT_GREEN_400)
+    xai_display = ft.Column(visible=False, horizontal_alignment="center", width=380)
+
     main_card = ft.Container(bgcolor=ft.Colors.BLUE_GREY_800, padding=35, border_radius=25, content=ft.Column([
         nom_in, ft.Row([m_sci, m_lit], alignment="center"), rev_in, int_in, 
-        ft.Row([
-            ft.Button("ANALYSER", on_click=calculer, bgcolor=ft.Colors.INDIGO_500, color="white"), 
-            ft.Button("STATS", on_click=ouvrir_stats, bgcolor=ft.Colors.AMBER_700, color="white"), 
-            ft.Button("HISTO", on_click=voir_base, bgcolor=ft.Colors.BLUE_GREY_400, color="white"), 
-            ft.Button("IMPORTER", on_click=importer_texte, bgcolor=ft.Colors.GREEN_600, color="white")
-        ], alignment="center", spacing=10), 
-        ft.Row([
-            ft.TextButton("Exporter PDF", on_click=exporter_pdf_action), 
-            ft.TextButton("Exporter CSV", on_click=exporter_csv_action)
-        ], alignment="center")
+        ft.Row([ft.Button("ANALYSER", on_click=calculer), ft.Button("HISTO", on_click=voir_base)], alignment="center", spacing=10), 
+        ft.Row([ft.TextButton("Exporter PDF", on_click=exporter_pdf_action), ft.TextButton("Exporter CSV", on_click=exporter_csv_action)], alignment="center")
     ], horizontal_alignment="center"))
-    
-    res_container = ft.Container(bgcolor=ft.Colors.BLUE_GREY_800, padding=25, border_radius=25, content=ft.Column([ft.Text("📊 POIDS DÉCISIONNEL", weight="bold", size=14), xai_display], horizontal_alignment="center", spacing=15))
 
     async def tenter_connexion(e):
         if verifier_acces(user_log.value, pass_log.value):
             page.clean()
-            page.add(ft.Column([
-                ft.Container(gradient=ft.LinearGradient(colors=[ft.Colors.INDIGO_900, ft.Colors.GREEN_900]), padding=25, content=ft.Row([header_title, ft.IconButton(ft.Icons.LIGHT_MODE, on_click=lambda _: None)], alignment="center")),
-                ft.Container(height=20), main_card, ft.Container(height=20),
-                ft.Row([ft.Column([res_final, conf_txt, prog_conf], horizontal_alignment="center", width=550), res_container], alignment="center")
-            ], scroll=ft.ScrollMode.ALWAYS))
+            page.add(ft.Column([ft.Container(padding=25, content=header_title), main_card, ft.Column([res_final, conf_txt, prog_conf, xai_display], horizontal_alignment="center")], scroll=ft.ScrollMode.ALWAYS))
             page.update()
-        else: notifier("🔒 Erreur", ft.Colors.RED)
+        else: notifier("🔒 Erreur Code", ft.Colors.RED)
 
     user_log = ft.TextField(label="Admin", width=320); pass_log = ft.TextField(label="Code", width=320, password=True, on_submit=tenter_connexion)
-    page.add(ft.Container(content=ft.Column([ft.Icon(ft.Icons.LOCK, size=80), ft.Text("CONNEXION", size=24, weight="bold"), user_log, pass_log, ft.Button("OUVRIR", on_click=tenter_connexion, width=320)], horizontal_alignment="center"), alignment=ft.Alignment(0,0), expand=True))
+    page.add(ft.Container(content=ft.Column([ft.Icon(ft.Icons.LOCK, size=80), user_log, pass_log, ft.Button("OUVRIR", on_click=tenter_connexion, width=320)], horizontal_alignment="center"), alignment=ft.Alignment(0,0), expand=True))
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8550))
-    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port, host="0.0.0.0", assets_dir="assets")
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get("PORT", 8550)), host="0.0.0.0", assets_dir="assets")
