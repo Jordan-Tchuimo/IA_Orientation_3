@@ -1,4 +1,6 @@
-flet
-fpdf2
-pandas
-scikit-learn
+streamlit
+plotly
+requests
+reportlab
+openpyxl
+python-docx
