@@ -1,0 +1,9 @@
+ligne 539 bibliographie.bib
+@book{lonchamp2015,
+  author    = {Jacques Lonchamp},
+  title     = {Ingénierie du logiciel : Modèles de processus et techniques de développement},
+  publisher = {Dunod},
+  year      = {2015},
+  address   = {Paris},
+  edition   = {3ème édition}
+}

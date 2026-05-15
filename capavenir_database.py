@@ -348,6 +348,42 @@ class CapAvenirDB:
         )
         """)
 
+        # ----- Table des soumissions de tests par les élèves -----
+        # Créée ici et également initialisée dans l'app pour garantir la compatibilité
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS eleve_submissions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            nom             TEXT    NOT NULL,
+            prenom          TEXT    NOT NULL,
+            lycee           TEXT,
+            -- Scores bruts (nb bonnes réponses / total questions * 20)
+            d48_score       REAL,
+            krx_score       REAL,
+            meca_score      REAL,
+            bv11_score      REAL,
+            prc_score       REAL,
+            -- Scores bruts absolus (nb bonnes réponses)
+            d48_brut        INTEGER,
+            krx_brut        INTEGER,
+            meca_brut       INTEGER,
+            bv11_brut       INTEGER,
+            prc_brut        INTEGER,
+            -- Total questions par test
+            d48_total       INTEGER,
+            krx_total       INTEGER,
+            meca_total      INTEGER,
+            bv11_total      INTEGER,
+            prc_total       INTEGER,
+            -- Aptitudes calculées
+            SA_etal         REAL,
+            LA_etal         REAL,
+            -- Statut de prise en charge
+            pris_en_charge  INTEGER DEFAULT 0,  -- 0=non, 1=oui (conseiller a lancé le diagnostic)
+            date_soumission TEXT    NOT NULL,
+            UNIQUE(nom, prenom, lycee)
+        )
+        """)
+
         self.conn.commit()
 
     # -------------------------------------------------------------------------
@@ -415,6 +451,113 @@ class CapAvenirDB:
             self.conn.commit()
         except Exception:
             pass
+
+    # -------------------------------------------------------------------------
+    # SOUMISSIONS TESTS ÉLÈVES (espace élève → conseiller)
+    # -------------------------------------------------------------------------
+    def sauvegarder_submission_eleve(self, nom: str, prenom: str, lycee: str,
+                                     scores: dict, bruts: dict, totaux: dict,
+                                     SA_etal: float, LA_etal: float) -> dict:
+        """
+        Enregistre les résultats de tests passés par un élève depuis l'espace élève.
+        En cas de doublon (même élève), met à jour les scores.
+
+        Args:
+            nom, prenom, lycee : Identité de l'élève
+            scores  : {'d48': score/20, 'krx': ..., 'meca': ..., 'bv11': ..., 'prc': ...}
+            bruts   : {'d48': nb_bonnes, 'krx': ..., ...}
+            totaux  : {'d48': nb_total_questions, ...}
+            SA_etal : Aptitude scientifique étalonnée
+            LA_etal : Aptitude littéraire étalonnée
+
+        Returns:
+            dict avec 'succes', 'message'
+        """
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        nom_clean    = (nom or "").strip().upper()
+        prenom_clean = (prenom or "").strip().capitalize()
+        lycee_clean  = (lycee or "").strip()
+        try:
+            self.conn.execute("""
+                INSERT INTO eleve_submissions
+                    (nom, prenom, lycee,
+                     d48_score, krx_score, meca_score, bv11_score, prc_score,
+                     d48_brut,  krx_brut,  meca_brut,  bv11_brut,  prc_brut,
+                     d48_total, krx_total, meca_total, bv11_total, prc_total,
+                     SA_etal, LA_etal, pris_en_charge, date_soumission)
+                VALUES (?,?,?,  ?,?,?,?,?,  ?,?,?,?,?,  ?,?,?,?,?,  ?,?,0,?)
+                ON CONFLICT(nom, prenom, lycee) DO UPDATE SET
+                    d48_score=excluded.d48_score, krx_score=excluded.krx_score,
+                    meca_score=excluded.meca_score, bv11_score=excluded.bv11_score,
+                    prc_score=excluded.prc_score,
+                    d48_brut=excluded.d48_brut,   krx_brut=excluded.krx_brut,
+                    meca_brut=excluded.meca_brut,  bv11_brut=excluded.bv11_brut,
+                    prc_brut=excluded.prc_brut,
+                    d48_total=excluded.d48_total, krx_total=excluded.krx_total,
+                    meca_total=excluded.meca_total,bv11_total=excluded.bv11_total,
+                    prc_total=excluded.prc_total,
+                    SA_etal=excluded.SA_etal, LA_etal=excluded.LA_etal,
+                    pris_en_charge=0,
+                    date_soumission=excluded.date_soumission
+            """, (
+                nom_clean, prenom_clean, lycee_clean,
+                scores.get("d48"), scores.get("krx"), scores.get("meca"),
+                scores.get("bv11"), scores.get("prc"),
+                bruts.get("d48"), bruts.get("krx"), bruts.get("meca"),
+                bruts.get("bv11"), bruts.get("prc"),
+                totaux.get("d48"), totaux.get("krx"), totaux.get("meca"),
+                totaux.get("bv11"), totaux.get("prc"),
+                SA_etal, LA_etal, now,
+            ))
+            self.conn.commit()
+            return {"succes": True, "message": f"Tests de {prenom_clean} {nom_clean} enregistrés."}
+        except Exception as e:
+            return {"succes": False, "message": str(e)}
+
+    def lister_submissions_non_traitees(self) -> list:
+        """Retourne toutes les soumissions d'élèves pas encore prises en charge."""
+        try:
+            rows = self.conn.execute(
+                "SELECT * FROM eleve_submissions WHERE pris_en_charge=0 ORDER BY date_soumission DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def lister_toutes_submissions(self) -> list:
+        """Retourne toutes les soumissions (traitées ou non)."""
+        try:
+            rows = self.conn.execute(
+                "SELECT * FROM eleve_submissions ORDER BY pris_en_charge ASC, date_soumission DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def marquer_submission_prise_en_charge(self, nom: str, prenom: str, lycee: str):
+        """Marque une soumission comme prise en charge par le conseiller."""
+        try:
+            self.conn.execute(
+                """UPDATE eleve_submissions SET pris_en_charge=1
+                   WHERE UPPER(nom)=UPPER(?) AND UPPER(prenom)=UPPER(?) AND lycee=?""",
+                (nom.strip(), prenom.strip(), lycee.strip())
+            )
+            self.conn.commit()
+        except Exception:
+            pass
+
+    def get_submission_eleve(self, nom: str, prenom: str) -> dict:
+        """Récupère la soumission de tests d'un élève précis."""
+        try:
+            row = self.conn.execute(
+                """SELECT * FROM eleve_submissions
+                   WHERE UPPER(nom)=UPPER(?) AND UPPER(prenom)=UPPER(?)""",
+                (nom.strip(), prenom.strip())
+            ).fetchone()
+            return dict(row) if row else {}
+        except Exception:
+            return {}
+
 
     # -------------------------------------------------------------------------
     # SAUVEGARDE PRINCIPALE
@@ -1323,4 +1466,5 @@ if __name__ == "__main__":
         os.remove("test_capavenir.db")
         print("\n[Test terminé] Fichier test supprimé.")
     print("\n✅ Module capavenir_database.py opérationnel.")
+
 

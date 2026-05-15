@@ -29,6 +29,53 @@ def get_db():
     return CapAvenirDB()
 db = get_db()
 
+# ─── Table des identifiants élèves (créée une seule fois) ────────────
+def _init_eleve_credentials():
+    db.conn.execute("""
+        CREATE TABLE IF NOT EXISTS eleve_credentials (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            nom           TEXT NOT NULL,
+            prenom        TEXT NOT NULL,
+            lycee         TEXT NOT NULL,
+            pwd_hash      TEXT NOT NULL,
+            date_creation TEXT NOT NULL,
+            UNIQUE(nom, prenom, lycee)
+        )
+    """)
+    db.conn.commit()
+
+_init_eleve_credentials()
+
+def _save_eleve_credential(nom: str, prenom: str, lycee: str, password: str):
+    """Enregistre (ou met à jour) le mot de passe d'un élève."""
+    h   = hashlib.sha256(password.encode()).hexdigest()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    db.conn.execute("""
+        INSERT INTO eleve_credentials (nom, prenom, lycee, pwd_hash, date_creation)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(nom, prenom, lycee) DO UPDATE SET
+            pwd_hash=excluded.pwd_hash
+    """, (nom.strip().upper(), prenom.strip().capitalize(), lycee.strip(), h, now))
+    db.conn.commit()
+
+def _verify_eleve_credential(nom: str, prenom: str, password: str) -> bool:
+    """Vérifie le mot de passe d'un élève (nom + prénom + mdp)."""
+    h = hashlib.sha256(password.encode()).hexdigest()
+    row = db.conn.execute(
+        """SELECT id FROM eleve_credentials
+           WHERE UPPER(nom)=UPPER(?) AND UPPER(prenom)=UPPER(?) AND pwd_hash=?""",
+        (nom.strip(), prenom.strip(), h)
+    ).fetchone()
+    return row is not None
+
+def _eleve_exists(nom: str, prenom: str) -> bool:
+    """Vérifie si un élève a un compte (credential enregistré)."""
+    row = db.conn.execute(
+        "SELECT id FROM eleve_credentials WHERE UPPER(nom)=UPPER(?) AND UPPER(prenom)=UPPER(?)",
+        (nom.strip(), prenom.strip())
+    ).fetchone()
+    return row is not None
+
 # Mot de passe conseiller (SHA-256) — défaut: capavenir2025
 # Pour changer: python3 -c "import hashlib; print(hashlib.sha256(b'VOTRE_MDT').hexdigest())"
 CONSEILLER_PWD_HASH = "de07220a5f97bf76fc0ad428c9d7e90318d853fdc227484172e6d29da0c1c4bf"
@@ -1168,7 +1215,6 @@ def afficher_login_conseiller():
                 st.session_state.login_error = "Identifiant ou mot de passe incorrect."
     if st.session_state.get("login_error"):
         st.error(st.session_state.login_error)
-    st.caption("Identifiant par défaut : `conseiller` · Mot de passe : `capavenir2025`")
 
 with st.sidebar:
     st.markdown("### ⚙️ Paramètres")
@@ -1333,6 +1379,10 @@ defaults = {
     "show_espace_eleve": False,
     "eleve_nom_recherche": "",
     "eleve_dossier_actif": None,
+    # Page d'accueil
+    "mode_accueil": "accueil",       # "accueil" | "eleve" | "conseiller"
+    "accueil_sous_mode": None,        # None | "inscription" | "connexion"
+    "eleve_inscrit": False,
     # S7 — Identifiant de session unique pour l'auto-save anti-perte de données
     "session_id": None,
 }
@@ -1824,442 +1874,6 @@ def _generer_pdf_rapport(dossiers, stats):
     return buf.getvalue()
 
 
-# =====================================================================
-# TABLEAU DE BORD — Mode Conseiller uniquement
-# =====================================================================
-def afficher_dashboard():
-    STATUT_META = {
-        "confirme":    ("✅ Confirmés",    "#10b981","#d1fae5","badge-confirme"),
-        "revise":      ("🔄 Révisés",      "#ec4899","#fce7f3","badge-revise"),
-        "attente":     ("⏳ En attente",   "#f97316","#fff7ed","badge-attente"),
-        "probation":   ("⚠️ Probation",    "#f59e0b","#fef3c7","badge-probation"),
-        "indetermine": ("❓ Indéterminés", "#6b7280","#f3f4f6","badge-indetermine"),
-    }
-
-    # ── Titre ──
-    st.markdown("""
-    <div style="display:flex;align-items:center;gap:0.8rem;margin-bottom:1.5rem;">
-        <div style="font-size:2.2rem;">📊</div>
-        <div>
-            <div style="font-size:1.4rem;font-weight:800;">Tableau de Bord Conseiller</div>
-            <div style="font-size:0.82rem;opacity:0.6;margin-top:2px;">
-                Vue réservée — Données en temps réel depuis la base de données
-            </div>
-        </div>
-    </div>""", unsafe_allow_html=True)
-
-    # ── Stats ──
-    try:
-        stats = db.statistiques()
-    except Exception:
-        stats = {"total":0,"nb_confirmes":0,"nb_attente":0,"nb_probation":0,
-                 "nb_revises":0,"nb_serie_c":0,"nb_serie_a":0}
-
-    total = stats.get("total", 0)
-    stat_items = [
-        ("Total",       total,                      "#6d28d9","#f3e8ff"),
-        ("✅ Confirmés", stats.get("nb_confirmes",0), "#10b981","#d1fae5"),
-        ("⏳ Attente",   stats.get("nb_attente",0),   "#f97316","#fff7ed"),
-        ("⚠️ Probation", stats.get("nb_probation",0), "#f59e0b","#fef3c7"),
-        ("🔄 Révisés",   stats.get("nb_revises",0),   "#ec4899","#fce7f3"),
-    ]
-    cols_s = st.columns(5)
-    for col, (lbl, val, color, bg) in zip(cols_s, stat_items):
-        with col:
-            st.markdown(f"""
-            <div class="dash-stat-card">
-                <div class="dash-stat-val" style="color:{color};">{val}</div>
-                <div class="dash-stat-lbl">{lbl}</div>
-            </div>""", unsafe_allow_html=True)
-
-    # ── Graphiques ──
-    if total > 0:
-        st.write("")
-        cg1, cg2 = st.columns([1,2])
-        with cg1:
-            nb_c = stats.get("nb_serie_c",0)
-            nb_a = stats.get("nb_serie_a",0)
-            fig_p = go.Figure(go.Pie(
-                labels=["Série C","Série A","Indét."],
-                values=[nb_c, nb_a, max(0, total-nb_c-nb_a)],
-                hole=0.55, textinfo="label+percent", textfont_size=10,
-                marker=dict(colors=["#10b981","#3b82f6","#94a3b8"],
-                            line=dict(color="white",width=2)),
-            ))
-            fig_p.update_layout(showlegend=False, height=190,
-                margin=dict(l=5,r=5,t=15,b=5),
-                annotations=[dict(text=f"<b>{total}</b>",x=0.5,y=0.5,
-                                  font_size=18,showarrow=False)])
-            st.plotly_chart(fig_p, use_container_width=True)
-        with cg2:
-            fig_b = go.Figure(go.Bar(
-                x=["Confirmés","Attente","Probation","Révisés"],
-                y=[stats.get(k,0) for k in ["nb_confirmes","nb_attente","nb_probation","nb_revises"]],
-                marker_color=["#10b981","#f97316","#f59e0b","#ec4899"],
-                text=[stats.get(k,0) for k in ["nb_confirmes","nb_attente","nb_probation","nb_revises"]],
-                textposition="outside",
-            ))
-            fig_b.update_layout(height=190,margin=dict(l=5,r=5,t=15,b=5),
-                yaxis=dict(visible=False),showlegend=False,
-                plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig_b, use_container_width=True)
-
-    st.divider()
-
-    # ── Filtres ──
-    fc1, fc2, fc3 = st.columns([2,1,1])
-    with fc1:
-        search_q = st.text_input("🔍 Rechercher (nom ou prénom)", placeholder="Ex : MBALLA, Jean...", key="dash_search")
-    with fc2:
-        filtre_statut = st.selectbox("Statut", ["Tous","confirme","revise","attente","probation","indetermine"], key="dash_filtre")
-    with fc3:
-        filtre_serie = st.selectbox("Série", ["Toutes","C","A","?"], key="dash_serie")
-
-    # ── Chargement ──
-    try:
-        statuts_list = ["confirme","revise","attente","probation","indetermine"] if filtre_statut=="Tous" else [filtre_statut]
-        tous_dossiers = []
-        for s in statuts_list:
-            for d in db.lister_dossiers(s):
-                d["_statut_affiche"] = s
-                tous_dossiers.append(d)
-    except Exception as e:
-        st.error(f"Erreur lecture BDD : {e}")
-        tous_dossiers = []
-
-    if search_q.strip():
-        q = search_q.strip().upper()
-        tous_dossiers = [d for d in tous_dossiers if
-            q in (d.get("nom","") or "").upper() or
-            q in (d.get("prenom","") or "").upper()]
-    if filtre_serie != "Toutes":
-        tous_dossiers = [d for d in tous_dossiers if
-            (d.get("serie_finale") or d.get("serie_provisoire") or d.get("serie_cible") or "?") == filtre_serie]
-
-    # ── Tableau ──
-    st.markdown(f"**{len(tous_dossiers)} dossier(s)**")
-    if not tous_dossiers:
-        st.info("Aucun dossier ne correspond aux critères.")
-    else:
-        h_cols = st.columns([2.5,2,2.5,1.2,1.2,1.5,1.5,1.8])
-        for col, lbl in zip(h_cols, ["Nom & Prénom","Lycée","Projet Pro","SA","LA","Série","Statut","Date"]):
-            col.markdown(f"<div style='font-size:0.7rem;font-weight:700;text-transform:uppercase;opacity:0.5;letter-spacing:0.06em;'>{lbl}</div>", unsafe_allow_html=True)
-        st.markdown("<hr style='margin:0.3rem 0 0.5rem 0;opacity:0.25;'>", unsafe_allow_html=True)
-        for d in tous_dossiers:
-            nom_a   = (d.get("nom","") or "").upper()
-            prn_a   = (d.get("prenom","") or "").capitalize()
-            lycee_a = (d.get("lycee","") or "—")[:22]
-            proj_a  = (d.get("projet_pro","") or "—")[:22]
-            sa_a    = float(d.get("SA_etal") or d.get("SA_brut") or 0)
-            la_a    = float(d.get("LA_etal") or d.get("LA_brut") or 0)
-            serie_a = (d.get("serie_finale") or d.get("serie_provisoire") or d.get("serie_cible") or "?")
-            stat_a  = d.get("_statut_affiche","—")
-            date_a  = (d.get("date_modification","") or "")[:10]
-            _, _, _, s_badge = STATUT_META.get(stat_a, ("—","#6b7280","#f3f4f6","badge-indetermine"))
-            b_serie = "badge-c" if serie_a=="C" else ("badge-a" if serie_a=="A" else "")
-            r = st.columns([2.5,2,2.5,1.2,1.2,1.5,1.5,1.8])
-            r[0].markdown(f"**{nom_a}** {prn_a}")
-            r[1].markdown(f"<small>{lycee_a}</small>", unsafe_allow_html=True)
-            r[2].markdown(f"<small>{proj_a}</small>", unsafe_allow_html=True)
-            r[3].markdown(f"<b style='color:#10b981;'>{sa_a:.1f}</b>", unsafe_allow_html=True)
-            r[4].markdown(f"<b style='color:#3b82f6;'>{la_a:.1f}</b>", unsafe_allow_html=True)
-            r[5].markdown(f'<span class="dash-badge {b_serie}">{serie_a}</span>', unsafe_allow_html=True)
-            r[6].markdown(f'<span class="dash-badge {s_badge}">{stat_a}</span>', unsafe_allow_html=True)
-            r[7].markdown(f"<small style='opacity:0.6;'>{date_a}</small>", unsafe_allow_html=True)
-            st.markdown("<div style='border-bottom:1px solid rgba(0,0,0,0.05);margin:2px 0;'></div>", unsafe_allow_html=True)
-
-    # ── Mise à jour T2/T3 ──
-    st.divider()
-    st.markdown("#### 📝 Mettre à jour les notes — Dossiers non finalisés")
-    non_conf = [d for d in tous_dossiers if d.get("_statut_affiche") in ("attente","probation")]
-    if not non_conf:
-        st.info("Aucun dossier en attente ou en probation.")
-    else:
-        for d in non_conf:
-            nom_d    = (d.get("nom","") or "").upper()
-            prn_d    = (d.get("prenom","") or "").capitalize()
-            stat_d   = d.get("_statut_affiche","")
-            sa_d     = float(d.get("SA_etal") or d.get("SA_brut") or 0)
-            la_d     = float(d.get("LA_etal") or d.get("LA_brut") or 0)
-            trim_cur = d.get("trimestre_actuel") or d.get("trimestre_decision","T1")
-            nxt_trim = "T3" if trim_cur in ("T2","T3") else "T2"
-            dkey     = str(d.get("id","x")) + nom_d
-
-            with st.expander(f"📋 {nom_d} {prn_d}  ·  {stat_d.upper()}  ·  Saisir notes {nxt_trim}"):
-                st.markdown(f"SA={sa_d:.1f}/20 · LA={la_d:.1f}/20 · Trimestre actuel : **{trim_cur}**")
-                ca, cb = st.columns(2)
-                with ca:
-                    st.markdown("**Matières scientifiques**")
-                    t_k = nxt_trim.lower()
-                    m_v  = st.number_input(f"Maths",     0.0,20.0,float(d.get(f"maths_{t_k}") or 10),0.5,key=f"m_{dkey}")
-                    sp_v = st.number_input(f"Sci.Phy",   0.0,20.0,float(d.get(f"sci_phy_{t_k}") or 10),0.5,key=f"sp_{dkey}")
-                    sv_v = st.number_input(f"SVT",       0.0,20.0,float(d.get(f"svt_{t_k}") or 10),0.5,key=f"sv_{dkey}")
-                    ms_n = round((m_v+sp_v+sv_v)/3,2)
-                    st.metric(f"Moy. Sci. {nxt_trim}", f"{ms_n:.2f}/20",
-                              delta=f"{ms_n-10:+.1f} vs seuil", delta_color="normal" if ms_n>=10 else "inverse")
-                with cb:
-                    st.markdown("**Matières littéraires**")
-                    fr_v = st.number_input(f"Français",  0.0,20.0,float(d.get(f"francais_{t_k}") or 10),0.5,key=f"fr_{dkey}")
-                    hg_v = st.number_input(f"Hist-Géo",  0.0,20.0,float(d.get(f"histgeo_{t_k}") or 10),0.5,key=f"hg_{dkey}")
-                    an_v = st.number_input(f"Anglais",   0.0,20.0,float(d.get(f"anglais_{t_k}") or 10),0.5,key=f"an_{dkey}")
-                    ml_n = round((fr_v+hg_v+an_v)/3,2)
-                    st.metric(f"Moy. Lit. {nxt_trim}", f"{ml_n:.2f}/20",
-                              delta=f"{ml_n-10:+.1f} vs seuil", delta_color="normal" if ml_n>=10 else "inverse")
-
-                # Prévisualisation automatique du nouveau statut
-                serie_cur = (d.get("serie_finale") or d.get("serie_provisoire") or d.get("serie_cible") or "C")
-                ok = (ms_n >= 10) if sa_d >= la_d else (ml_n >= 10)
-                if stat_d == "attente":
-                    new_stat = "confirme" if ok else "probation"
-                    new_lbl  = "✅ CONFIRMÉ" if ok else "⚠️ PROBATION"
-                    new_serie= serie_cur
-                else:  # probation
-                    new_stat = "confirme" if ok else "revise"
-                    new_lbl  = "✅ CONFIRMÉ" if ok else "🔄 RÉVISÉ → " + ("A" if serie_cur=="C" else "C")
-                    new_serie= serie_cur if ok else ("A" if serie_cur=="C" else "C")
-
-                ok_color = "#065f46" if ok else "#7f1d1d"
-                ok_bg    = "#d1fae5" if ok else "#fee2e2"
-                st.markdown(f"""
-                <div style="background:{ok_bg};border-radius:10px;padding:0.55rem 1rem;
-                            margin-top:0.5rem;text-align:center;font-weight:700;color:{ok_color};">
-                    Prévisualisation : {new_lbl}
-                </div>""", unsafe_allow_html=True)
-
-                if st.button(f"💾 Valider et mettre à jour dans la BDD",
-                             use_container_width=True, type="primary", key=f"upd_{dkey}"):
-                    ss_u = dict(d)
-                    ss_u[f"maths_{t_k}"]   = m_v;  ss_u[f"sci_phy_{t_k}"] = sp_v; ss_u[f"svt_{t_k}"] = sv_v
-                    ss_u[f"francais_{t_k}"]= fr_v; ss_u[f"histgeo_{t_k}"]  = hg_v; ss_u[f"anglais_{t_k}"] = an_v
-                    t_num = nxt_trim[1]
-                    ss_u[f"t{t_num}_renseigne"] = True
-                    ss_u["statut"]            = new_stat
-                    ss_u["orientation_finale"]= new_serie
-                    ss_u["revenu"]            = d.get("revenu_famille","")
-                    ss_u["nom"]               = d.get("nom","")
-                    ss_u["prenom"]            = d.get("prenom","")
-                    res = db.sauvegarder_dossier(ss_u, None)
-                    if res["succes"]:
-                        st.success(f"✅ Statut mis à jour → **{new_stat.upper()}** | {res['message']}")
-                        rerun()
-                    else:
-                        st.error(res["message"])
-
-    # ── Exports multi-formats ──
-    st.divider()
-    st.markdown("#### 📤 Exports")
-    try:
-        all_exp = []
-        for s in ["confirme","revise","attente","probation","indetermine"]:
-            for dd in db.lister_dossiers(s):
-                dd["_statut_affiche"] = s
-                all_exp.append(dd)
-        stats_exp = db.statistiques()
-    except Exception:
-        all_exp = []; stats_exp = {}
-
-    # Récupérer le dossier configuré
-    doss = st.session_state.get("dossier_export", "").strip()
-    stamp = datetime.now().strftime('%Y%m%d_%H%M')
-
-    # Indicateur du mode d'enregistrement
-    if doss:
-        st.markdown(f"""
-        <div class="alert-success" style="padding:0.5rem 1rem; font-size:0.82rem;">
-            💾 <strong>Dossier configuré :</strong> {doss}<br>
-            <small>Les fichiers seront téléchargés ET enregistrés automatiquement dans ce dossier.</small>
-        </div>""", unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <div class="alert-info" style="padding:0.5rem 1rem; font-size:0.82rem;">
-            🌐 <strong>Mode téléchargement navigateur</strong> — Les boutons déclenchent
-            la boîte de dialogue "Enregistrer sous" de votre navigateur.<br>
-            <small>Pour un enregistrement automatique, configurez un dossier dans la barre latérale.</small>
-        </div>""", unsafe_allow_html=True)
-
-    e1, e2, e3, e4 = st.columns(4)
-    with e1:
-        try:
-            xls = _generer_excel(all_exp)
-            if xls:
-                fname_xls = f"capavenir_{stamp}.xlsx"
-                _bouton_export("📊 Excel (.xlsx)", xls, fname_xls,
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    doss, key="exp_xls")
-            else:
-                st.caption("pip install openpyxl")
-        except Exception as ex:
-            st.caption(f"Excel: {ex}")
-    with e2:
-        try:
-            wrd = _generer_word(all_exp, stats_exp)
-            if wrd:
-                fname_wrd = f"capavenir_{stamp}.docx"
-                _bouton_export("📝 Word (.docx)", wrd, fname_wrd,
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    doss, key="exp_wrd")
-            else:
-                st.caption("pip install python-docx")
-        except Exception as ex:
-            st.caption(f"Word: {ex}")
-    with e3:
-        try:
-            pdf_r = _generer_pdf_rapport(all_exp, stats_exp)
-            fname_pdf = f"capavenir_{stamp}.pdf"
-            _bouton_export("📄 PDF Rapport", pdf_r, fname_pdf,
-                "application/pdf", doss, key="exp_pdf")
-        except Exception as ex:
-            st.caption(f"PDF: {ex}")
-    with e4:
-        try:
-            j = db.exporter_json()
-            fname_json = f"capavenir_{stamp}.json"
-            _bouton_export("📦 JSON", j.encode() if isinstance(j, str) else j,
-                fname_json, "application/json", doss, key="exp_json")
-        except Exception:
-            st.caption("JSON indisponible")
-
-
-# =====================================================================
-# TABLEAU DE BORD — Mode Conseiller uniquement
-# =====================================================================
-def generer_excel_export(dossiers):
-    if not OPENPYXL_OK:
-        return None
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Dossiers CapAvenir"
-    hfill = PatternFill("solid", fgColor="0F172A")
-    hfont = Font(bold=True, color="FFFFFF", size=10)
-    entetes = ["Nom","Prénom","Lycée","Âge","Sexe","Choix","Projet",
-               "SA","LA","Moy.Sci","Moy.Lit","D48","KRX","MECA","BV11","PRC",
-               "Série","Statut","Confiance%","Trimestre","Date"]
-    for ci, h in enumerate(entetes, 1):
-        c = ws.cell(1, ci, h)
-        c.fill = hfill; c.font = hfont
-        c.alignment = Alignment(horizontal="center")
-    for ri, d in enumerate(dossiers, 2):
-        serie = d.get("serie_finale") or d.get("serie_provisoire") or d.get("serie_cible") or "?"
-        vals = [
-            d.get("nom",""), d.get("prenom",""), d.get("lycee",""),
-            d.get("age",""), d.get("sexe",""), d.get("choix_personnel",""), d.get("projet_pro",""),
-            round(float(d.get("SA_etal") or d.get("SA_brut") or 0),2),
-            round(float(d.get("LA_etal") or d.get("LA_brut") or 0),2),
-            round(float(d.get("moy_sci_t1") or 0),2), round(float(d.get("moy_lit_t1") or 0),2),
-            d.get("d48_brut",""), d.get("krx_brut",""), d.get("meca_brut",""),
-            d.get("bv11_brut",""), d.get("prc_brut",""),
-            serie, d.get("statut",""), d.get("score_confiance",""),
-            d.get("trimestre_actuel") or d.get("trimestre_decision",""),
-            (d.get("date_modification","") or "")[:10],
-        ]
-        for ci, v in enumerate(vals, 1):
-            ws.cell(ri, ci, v)
-    for col in ws.columns:
-        ws.column_dimensions[col[0].column_letter].width = 15
-    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
-    return buf.getvalue()
-
-
-def generer_word_export(dossiers, stats):
-    if not DOCX_OK:
-        return None
-    doc = DocxDocument()
-    doc.core_properties.title = "Rapport CapAvenir CMR"
-    doc.styles["Normal"].font.name = "Calibri"
-    doc.styles["Normal"].font.size = Pt(10)
-    titre = doc.add_heading("Rapport d'Orientation — CapAvenir CMR", 0)
-    titre.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    doc.add_paragraph(
-        f"Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')} — {len(dossiers)} dossier(s)"
-    )
-    doc.add_heading("Statistiques globales", level=1)
-    tbl = doc.add_table(rows=1, cols=2); tbl.style = "Table Grid"
-    tbl.rows[0].cells[0].text = "Indicateur"
-    tbl.rows[0].cells[1].text = "Valeur"
-    for lbl, key in [("Total","total"),("Confirmés","nb_confirmes"),
-                     ("En attente","nb_attente"),("Probation","nb_probation"),
-                     ("Révisés","nb_revises"),("Série C","nb_serie_c"),("Série A","nb_serie_a")]:
-        r = tbl.add_row().cells; r[0].text = lbl; r[1].text = str(stats.get(key,0))
-    doc.add_heading("Liste des dossiers", level=1)
-    t2 = doc.add_table(rows=1, cols=6); t2.style = "Table Grid"
-    for i, h in enumerate(["Nom & Prénom","Lycée","SA","LA","Série","Statut"]):
-        t2.rows[0].cells[i].text = h
-    for d in dossiers:
-        serie = d.get("serie_finale") or d.get("serie_provisoire") or d.get("serie_cible") or "?"
-        r = t2.add_row().cells
-        r[0].text = f"{(d.get('nom') or '').upper()} {(d.get('prenom') or '').capitalize()}"
-        r[1].text = (d.get("lycee") or "—")[:25]
-        r[2].text = f"{float(d.get('SA_etal') or d.get('SA_brut') or 0):.1f}"
-        r[3].text = f"{float(d.get('LA_etal') or d.get('LA_brut') or 0):.1f}"
-        r[4].text = serie; r[5].text = d.get("statut","—")
-    buf = io.BytesIO(); doc.save(buf); buf.seek(0)
-    return buf.getvalue()
-
-
-def generer_pdf_rapport(dossiers, stats):
-    """PDF récapitulatif de tous les dossiers."""
-    buf = io.BytesIO()
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib import colors
-    from reportlab.lib.units import cm
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.lib.enums import TA_CENTER
-    doc2 = SimpleDocTemplate(buf, pagesize=A4,
-           leftMargin=1.5*cm, rightMargin=1.5*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
-    C_DARK  = colors.HexColor("#0f172a")
-    C_GREEN = colors.HexColor("#10b981")
-    C_GRAY  = colors.HexColor("#64748b")
-    sT  = ParagraphStyle("t", fontName="Helvetica-Bold", fontSize=14, textColor=C_DARK, alignment=TA_CENTER, spaceAfter=4)
-    sSub= ParagraphStyle("s", fontName="Helvetica", fontSize=8, textColor=C_GRAY, alignment=TA_CENTER, spaceAfter=2)
-    sB  = ParagraphStyle("b", fontName="Helvetica", fontSize=8, textColor=C_DARK, spaceAfter=2)
-    story2 = []
-    story2.append(Paragraph("RAPPORT D'ORIENTATION — CapAvenir CMR", sT))
-    story2.append(Paragraph(f"Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')} — {len(dossiers)} dossier(s)", sSub))
-    story2.append(Spacer(1, 0.3*cm))
-    stat_rows = [["Confirmés","En attente","Probation","Révisés","Série C","Série A"],
-                 [str(stats.get("nb_confirmes",0)), str(stats.get("nb_attente",0)),
-                  str(stats.get("nb_probation",0)), str(stats.get("nb_revises",0)),
-                  str(stats.get("nb_serie_c",0)), str(stats.get("nb_serie_a",0))]]
-    ts = Table(stat_rows, colWidths=[2.8*cm]*6)
-    ts.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,0),C_DARK),("TEXTCOLOR",(0,0),(-1,0),colors.white),
-        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),8),
-        ("ALIGN",(0,0),(-1,-1),"CENTER"),
-        ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#e2e8f0")),
-        ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
-    ]))
-    story2.append(ts)
-    story2.append(Spacer(1, 0.3*cm))
-    hdr_row = [["Nom & Prénom","Lycée","SA","LA","Série","Statut","Confiance","Date"]]
-    data_rows = []
-    for d in dossiers:
-        serie = d.get("serie_finale") or d.get("serie_provisoire") or d.get("serie_cible") or "?"
-        data_rows.append([
-            f"{(d.get('nom') or '').upper()} {(d.get('prenom') or '').capitalize()}",
-            (d.get("lycee") or "—")[:18],
-            f"{float(d.get('SA_etal') or d.get('SA_brut') or 0):.1f}",
-            f"{float(d.get('LA_etal') or d.get('LA_brut') or 0):.1f}",
-            serie, d.get("statut","—"),
-            f"{d.get('score_confiance',0) or 0}%",
-            (d.get("date_modification","") or "")[:10],
-        ])
-    tbl_dos = Table(hdr_row + data_rows,
-                    colWidths=[4.5*cm, 3*cm, 1.2*cm, 1.2*cm, 1.3*cm, 2.2*cm, 1.8*cm, 2*cm])
-    tbl_dos.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,0),C_DARK),("TEXTCOLOR",(0,0),(-1,0),colors.white),
-        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),7.5),
-        ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.HexColor("#f8fafc"),colors.white]),
-        ("GRID",(0,0),(-1,-1),0.2,colors.HexColor("#e2e8f0")),
-        ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
-        ("LEFTPADDING",(0,0),(-1,-1),4),
-    ]))
-    story2.append(tbl_dos)
-    doc2.build(story2)
-    buf.seek(0)
-    return buf.getvalue()
-
-
 def afficher_dashboard():
     """Tableau de bord complet — Mode Conseiller."""
     STATUT_META = {
@@ -2337,209 +1951,457 @@ def afficher_dashboard():
 
     st.divider()
 
-    # ── Filtres ──
-    fc1, fc2, fc3 = st.columns([2, 1, 1])
-    with fc1:
-        search_q = st.text_input("🔍 Rechercher (nom ou prénom)",
-                                  placeholder="Ex : MBALLA, Jean...", key="dash_search")
-    with fc2:
-        filtre_statut = st.selectbox("Statut",
-            ["Tous","confirme","revise","attente","probation","indetermine"], key="dash_filtre")
-    with fc3:
-        filtre_serie = st.selectbox("Série", ["Toutes","C","A","?"], key="dash_serie")
+    # ══════════════════════════════════════════════════════════════
+    # ONGLETS PRINCIPAUX DU DASHBOARD
+    # ══════════════════════════════════════════════════════════════
+    tab_inscrits, tab_dossiers, tab_suivi, tab_exports = st.tabs([
+        "👥 Élèves Inscrits — Saisir notes & Diagnostic",
+        "📋 Tous les Dossiers",
+        "🔄 Suivi T2/T3",
+        "📤 Exports",
+    ])
 
-    # ── Chargement données ──
-    try:
-        statuts_a_lister = (["confirme","revise","attente","probation","indetermine"]
-                            if filtre_statut == "Tous" else [filtre_statut])
-        tous_dossiers = []
-        for s in statuts_a_lister:
-            for d in db.lister_dossiers(s):
-                d["_statut_affiche"] = s
-                tous_dossiers.append(d)
-    except Exception as e:
-        st.error(f"Erreur lecture BDD : {e}")
-        tous_dossiers = []
+    # ──────────────────────────────────────────────────────────────
+    # ONGLET 1 : ÉLÈVES INSCRITS → Saisie notes + Diagnostic
+    # ──────────────────────────────────────────────────────────────
+    with tab_inscrits:
+        st.markdown("#### 👥 Liste des élèves inscrits sur CapAvenir CMR")
+        st.markdown("""
+        <div style="background:linear-gradient(135deg,#eff6ff,#dbeafe);
+                    border-left:4px solid #3b82f6; border-radius:10px;
+                    padding:0.7rem 1.2rem; margin-bottom:1rem; font-size:0.84rem; color:#1e3a8a;">
+            📌 <strong>Mode Conseiller :</strong> Pour chaque élève ayant passé les tests psychotechniques,
+            saisissez les notes du trimestre et cliquez sur <strong>Lancer le Diagnostic</strong>
+            pour générer l'orientation par le moteur IA.
+        </div>
+        """, unsafe_allow_html=True)
 
-    if search_q.strip():
-        q = search_q.strip().upper()
-        tous_dossiers = [d for d in tous_dossiers if
-                         q in (d.get("nom","") or "").upper() or
-                         q in (d.get("prenom","") or "").upper()]
-    if filtre_serie != "Toutes":
-        tous_dossiers = [d for d in tous_dossiers if
-                         (d.get("serie_finale") or d.get("serie_provisoire") or
-                          d.get("serie_cible") or "?") == filtre_serie]
+        # Charger tous les inscrits depuis eleve_credentials
+        try:
+            rows_cred = db.conn.execute(
+                "SELECT nom, prenom, lycee, date_creation FROM eleve_credentials ORDER BY date_creation DESC"
+            ).fetchall()
+            inscrits = [dict(r) for r in rows_cred]
+        except Exception as e:
+            inscrits = []
+            st.error(f"Erreur lecture des inscrits : {e}")
 
-    # ── Tableau ──
-    st.markdown(f"**{len(tous_dossiers)} dossier(s) trouvé(s)**")
-    if not tous_dossiers:
-        st.info("Aucun dossier ne correspond aux critères.")
-    else:
-        h_cols = st.columns([2.5, 2.2, 2, 1.2, 1.2, 1.5, 1.8, 1.8])
-        for col, lbl in zip(h_cols, ["Nom & Prénom","Lycée","Projet","SA","LA","Série","Statut","Date"]):
-            col.markdown(f"<div style='font-size:0.7rem;font-weight:700;text-transform:uppercase;"
-                         f"opacity:0.5;letter-spacing:0.06em;'>{lbl}</div>", unsafe_allow_html=True)
-        st.markdown("<hr style='margin:0.2rem 0 0.4rem;opacity:0.2;'>", unsafe_allow_html=True)
-        for d in tous_dossiers:
-            stat_af = d.get("_statut_affiche","—")
-            _, _, _, s_badge = STATUT_META.get(stat_af, ("","#6b7280","#f3f4f6","badge-indetermine"))
-            serie_af = (d.get("serie_finale") or d.get("serie_provisoire") or
-                        d.get("serie_cible") or "?")
-            badge_serie = "badge-c" if serie_af=="C" else ("badge-a" if serie_af=="A" else "")
-            sa_v = float(d.get("SA_etal") or d.get("SA_brut") or 0)
-            la_v = float(d.get("LA_etal") or d.get("LA_brut") or 0)
-            rc = st.columns([2.5, 2.2, 2, 1.2, 1.2, 1.5, 1.8, 1.8])
-            rc[0].markdown(f"**{(d.get('nom') or '').upper()}** {(d.get('prenom') or '').capitalize()}")
-            rc[1].markdown(f"<small>{(d.get('lycee') or '—')[:22]}</small>", unsafe_allow_html=True)
-            rc[2].markdown(f"<small>{(d.get('projet_pro') or '—')[:20]}</small>", unsafe_allow_html=True)
-            rc[3].markdown(f"<b style='color:#10b981;'>{sa_v:.1f}</b>", unsafe_allow_html=True)
-            rc[4].markdown(f"<b style='color:#3b82f6;'>{la_v:.1f}</b>", unsafe_allow_html=True)
-            rc[5].markdown(f'<span class="dash-badge {badge_serie}">{serie_af}</span>', unsafe_allow_html=True)
-            rc[6].markdown(f'<span class="dash-badge {s_badge}">{stat_af}</span>', unsafe_allow_html=True)
-            rc[7].markdown(f"<small style='opacity:0.5;'>{(d.get('date_modification','') or '')[:10]}</small>", unsafe_allow_html=True)
-            st.markdown("<div style='border-bottom:1px solid rgba(0,0,0,0.05);margin:0.1rem 0;'></div>", unsafe_allow_html=True)
+        if not inscrits:
+            st.info("Aucun élève inscrit pour le moment. Les élèves s'inscrivent depuis la page d'accueil.")
+        else:
+            # Barre de recherche dans les inscrits
+            srch_ins = st.text_input("🔍 Filtrer par nom ou prénom", key="srch_inscrits",
+                                      placeholder="Ex : MBALLA, Jean...")
+            if srch_ins.strip():
+                q_ins = srch_ins.strip().upper()
+                inscrits = [i for i in inscrits if
+                            q_ins in i.get("nom","").upper() or q_ins in i.get("prenom","").upper()]
 
-    # ── Mise à jour T2/T3 pour dossiers non confirmés ──
-    st.divider()
-    st.markdown("#### 📝 Saisir les notes T2/T3 — Dossiers en attente / probation")
-    non_conf = [d for d in tous_dossiers if d.get("_statut_affiche") in ("attente","probation")]
-    if not non_conf:
-        st.info("Aucun dossier en attente ou en probation dans cette vue.")
-    else:
-        for d in non_conf:
-            nom_d    = (d.get("nom","") or "").upper()
-            prenom_d = (d.get("prenom","") or "").capitalize()
-            stat_d   = d.get("_statut_affiche","")
-            sa_d     = float(d.get("SA_etal") or d.get("SA_brut") or 0)
-            la_d     = float(d.get("LA_etal") or d.get("LA_brut") or 0)
-            trim_a   = d.get("trimestre_actuel") or d.get("trimestre_decision","T1")
-            prochain = "T2" if trim_a == "T1" else "T3"
-            uid      = f"{d.get('id',0)}_{nom_d}"
+            st.markdown(f"**{len(inscrits)} élève(s) inscrit(s)**")
+            st.write("")
 
-            with st.expander(f"📋 {nom_d} {prenom_d} — {stat_d.upper()} → Saisir notes {prochain}"):
-                st.markdown(f"SA={sa_d:.1f}/20 · LA={la_d:.1f}/20 · Trimestre actuel : {trim_a}")
-                ca, cb = st.columns(2)
-                with ca:
-                    st.markdown("**🔬 Matières scientifiques**")
-                    mths = st.number_input(f"Maths {prochain}", 0.0, 20.0,
-                        float(d.get(f"maths_{prochain.lower()}") or 10.0), 0.5, key=f"mths_{uid}")
-                    sphy = st.number_input(f"Sci.Phy {prochain}", 0.0, 20.0,
-                        float(d.get(f"sci_phy_{prochain.lower()}") or 10.0), 0.5, key=f"sphy_{uid}")
-                    svtv = st.number_input(f"SVT {prochain}", 0.0, 20.0,
-                        float(d.get(f"svt_{prochain.lower()}") or 10.0), 0.5, key=f"svtv_{uid}")
-                    msc  = round((mths+sphy+svtv)/3, 2)
-                    st.metric(f"Moy. Sci. {prochain}", f"{msc:.2f}/20",
-                              delta=f"{msc-10:+.1f} vs seuil")
-                with cb:
-                    st.markdown("**📖 Matières littéraires**")
-                    frv  = st.number_input(f"Français {prochain}", 0.0, 20.0,
-                        float(d.get(f"francais_{prochain.lower()}") or 10.0), 0.5, key=f"frv_{uid}")
-                    hgv  = st.number_input(f"Hist-Géo {prochain}", 0.0, 20.0,
-                        float(d.get(f"histgeo_{prochain.lower()}") or 10.0), 0.5, key=f"hgv_{uid}")
-                    angv = st.number_input(f"Anglais {prochain}", 0.0, 20.0,
-                        float(d.get(f"anglais_{prochain.lower()}") or 10.0), 0.5, key=f"angv_{uid}")
-                    mlt  = round((frv+hgv+angv)/3, 2)
-                    st.metric(f"Moy. Lit. {prochain}", f"{mlt:.2f}/20",
-                              delta=f"{mlt-10:+.1f} vs seuil")
+            for ins in inscrits:
+                nom_i    = (ins.get("nom","") or "").upper()
+                prenom_i = (ins.get("prenom","") or "").capitalize()
+                lycee_i  = ins.get("lycee","") or "—"
+                date_i   = (ins.get("date_creation","") or "")[:10]
 
-                # Calcul automatique nouveau statut
-                serie_v   = (d.get("serie_finale") or d.get("serie_provisoire") or
-                             d.get("serie_cible") or "C")
-                cond_ok   = (msc >= 10) if sa_d >= la_d else (mlt >= 10)
-                if stat_d == "attente":
-                    new_stat = "confirme" if cond_ok else "probation"
-                    new_lbl  = "✅ CONFIRMÉ" if cond_ok else "⚠️ PROBATION"
+                # Vérifier si un dossier existe en BDD
+                try:
+                    dossiers_ex = db.rechercher_eleve(nom_i, prenom_i)
+                except Exception:
+                    dossiers_ex = []
+
+                has_dossier = len(dossiers_ex) > 0
+                dossier_ex  = dossiers_ex[0] if has_dossier else None
+
+                sa_ex = float(dossier_ex.get("SA_etal") or dossier_ex.get("SA_brut") or 0) if dossier_ex else None
+                la_ex = float(dossier_ex.get("LA_etal") or dossier_ex.get("LA_brut") or 0) if dossier_ex else None
+                has_tests = has_dossier and (sa_ex is not None and sa_ex > 0)
+                serie_ex = (dossier_ex.get("serie_finale") or dossier_ex.get("serie_provisoire") or
+                            dossier_ex.get("serie_cible") or None) if dossier_ex else None
+
+                # Badge état
+                if has_tests and serie_ex:
+                    badge = f"<span style='background:#d1fae5;color:#065f46;padding:2px 10px;border-radius:20px;font-size:0.75rem;font-weight:700;'>✅ Orienté → Série {serie_ex}</span>"
+                    expander_label = f"📋 {nom_i} {prenom_i} · {lycee_i} · ✅ Orienté Série {serie_ex}"
+                elif has_tests:
+                    badge = f"<span style='background:#fef3c7;color:#92400e;padding:2px 10px;border-radius:20px;font-size:0.75rem;font-weight:700;'>🧪 Tests OK — Notes à saisir</span>"
+                    expander_label = f"📋 {nom_i} {prenom_i} · {lycee_i} · 🧪 Tests passés — Saisir les notes"
                 else:
-                    new_stat = "confirme" if cond_ok else "revise"
-                    serie_v  = serie_v if cond_ok else ("A" if serie_v=="C" else "C")
-                    new_lbl  = "✅ CONFIRMÉ" if cond_ok else f"🔄 RÉVISÉ → Série {serie_v}"
-                ok_c = "#10b981" if cond_ok else "#ef4444"
-                ok_bg= "#ecfdf5" if cond_ok else "#fef2f2"
-                st.markdown(f"""
-                <div style="background:{ok_bg};border:1.5px solid {ok_c};border-radius:10px;
-                            padding:0.6rem 1rem;text-align:center;font-weight:700;
-                            color:{ok_c};margin:0.5rem 0;">
-                    Nouveau statut prévu : {new_lbl}
-                </div>""", unsafe_allow_html=True)
+                    badge = "<span style='background:#f1f5f9;color:#64748b;padding:2px 10px;border-radius:20px;font-size:0.75rem;font-weight:700;'>⏳ Tests non encore passés</span>"
+                    expander_label = f"📋 {nom_i} {prenom_i} · {lycee_i} · ⏳ En attente des tests"
 
-                if st.button(f"✅ Valider et mettre à jour dans la BDD",
-                             use_container_width=True, type="primary",
-                             key=f"val_{uid}"):
-                    ss_upd = dict(d)
-                    tk = prochain.lower()
-                    ss_upd[f"maths_{tk}"]   = mths
-                    ss_upd[f"sci_phy_{tk}"] = sphy
-                    ss_upd[f"svt_{tk}"]     = svtv
-                    ss_upd[f"francais_{tk}"]= frv
-                    ss_upd[f"histgeo_{tk}"] = hgv
-                    ss_upd[f"anglais_{tk}"] = angv
-                    ss_upd[f"t{prochain[1]}_renseigne"] = True
-                    ss_upd["statut"]            = new_stat
-                    ss_upd["orientation_finale"]= serie_v
-                    ss_upd["revenu"]            = d.get("revenu_famille","")
-                    res_upd = db.sauvegarder_dossier(ss_upd, None)
-                    if res_upd["succes"]:
-                        st.success(f"✅ Statut mis à jour → **{new_stat.upper()}** · {res_upd['message']}")
-                        rerun()
+                with st.expander(expander_label, expanded=(has_tests and not serie_ex)):
+                    ci1, ci2, ci3 = st.columns([2, 2, 2])
+                    with ci1:
+                        st.markdown(f"**👤 {nom_i} {prenom_i}**")
+                        st.caption(f"🏫 {lycee_i}")
+                    with ci2:
+                        st.caption(f"📅 Inscrit le {date_i}")
+                        if has_tests:
+                            st.markdown(f"🧪 SA = **{sa_ex:.1f}**/20 · LA = **{la_ex:.1f}**/20")
+                    with ci3:
+                        st.markdown(badge, unsafe_allow_html=True)
+
+                    if not has_tests:
+                        st.markdown("""
+                        <div style="background:#f8fafc;border:1px dashed #cbd5e1;border-radius:8px;
+                                    padding:0.8rem 1rem;margin-top:0.5rem;font-size:0.83rem;color:#64748b;text-align:center;">
+                            ⏳ Cet élève n'a pas encore passé les tests psychotechniques.<br>
+                            Accompagnez-le dans la passation des tests depuis l'<strong>Espace Élève</strong>.
+                        </div>
+                        """, unsafe_allow_html=True)
+                        continue
+
+                    # ── Formulaire de saisie des notes ──────────────────────
+                    st.divider()
+                    st.markdown("##### 📚 Saisie des notes — Trimestre 1")
+                    uid_diag = f"{nom_i}_{prenom_i}_diag"
+
+                    # Pré-remplir si dossier existant
+                    def _pf(key, default=10.0):
+                        if dossier_ex:
+                            v = dossier_ex.get(f"{key}_t1") or dossier_ex.get(key)
+                            if v is not None:
+                                try: return float(v)
+                                except: pass
+                        return default
+
+                    cn1, cn2 = st.columns(2)
+                    with cn1:
+                        st.markdown("**🔬 Matières scientifiques**")
+                        n_maths  = st.number_input("Maths",    0.0, 20.0, _pf("maths"),  0.5, key=f"dm_{uid_diag}")
+                        n_sciphy = st.number_input("Sci.Phy",  0.0, 20.0, _pf("sci_phy"),0.5, key=f"dsp_{uid_diag}")
+                        n_svt    = st.number_input("SVT",      0.0, 20.0, _pf("svt"),    0.5, key=f"dsv_{uid_diag}")
+                        moy_sci_d = round((n_maths*5 + n_sciphy*4 + n_svt*2)/11, 2)
+                        st.metric("Moyenne Sci (coeff.)", f"{moy_sci_d:.2f}/20",
+                                  delta=f"{moy_sci_d-10:+.1f} vs seuil 10",
+                                  delta_color="normal" if moy_sci_d>=10 else "inverse")
+                    with cn2:
+                        st.markdown("**📖 Matières littéraires**")
+                        n_fr     = st.number_input("Français", 0.0, 20.0, _pf("francais"),0.5, key=f"dfr_{uid_diag}")
+                        n_hg     = st.number_input("Hist-Géo", 0.0, 20.0, _pf("histgeo"), 0.5, key=f"dhg_{uid_diag}")
+                        n_ang    = st.number_input("Anglais",  0.0, 20.0, _pf("anglais"),  0.5, key=f"dan_{uid_diag}")
+                        moy_lit_d = round((n_fr*5 + n_hg*3 + n_ang*2)/10, 2)
+                        st.metric("Moyenne Lit (coeff.)", f"{moy_lit_d:.2f}/20",
+                                  delta=f"{moy_lit_d-10:+.1f} vs seuil 10",
+                                  delta_color="normal" if moy_lit_d>=10 else "inverse")
+
+                    # ── Prévisualisation en temps réel ───────────────────────
+                    st.write("")
+                    sa_d = sa_diag
+                    la_d = la_diag
+
+                    # Choix de série de l'élève (depuis son profil enregistré)
+                    choix_diag = base.get("choix_personnel","") if dossier_ex else (
+                        sub_ex.get("choix_personnel","") if has_submission else ""
+                    )
+                    choix_C_d = "C" in choix_diag
+                    choix_A_d = "A" in choix_diag
+
+                    # ── Règle prioritaire : choix de l'élève ──
+                    _prio_C = choix_C_d and sa_d >= 10.0 and moy_sci_d >= 10.0
+                    _prio_A = choix_A_d and la_d >= 10.0 and moy_lit_d >= 10.0
+
+                    if _prio_C:
+                        serie_preview  = "C"
+                        seuil_ok       = True
+                        raison_preview = f"Choix élève validé — SA={sa_d:.1f}≥10 · Moy.Sci={moy_sci_d:.1f}≥10"
+                    elif _prio_A:
+                        serie_preview  = "A"
+                        seuil_ok       = True
+                        raison_preview = f"Choix élève validé — LA={la_d:.1f}≥10 · Moy.Lit={moy_lit_d:.1f}≥10"
                     else:
-                        st.error(res_upd["message"])
+                        # Moteur standard
+                        serie_preview = "C" if sa_d >= la_d else "A"
+                        seuil_ok = moy_sci_d >= 10 if serie_preview == "C" else moy_lit_d >= 10
+                        raison_preview = "Moteur standard (aptitudes + notes)"
 
-    # ── Exports multi-formats ──
-    st.divider()
-    st.markdown("#### 📤 Exports")
+                    statut_preview = "confirme" if seuil_ok else "attente"
+                    conf_preview   = min(100, max(0,
+                        round((min(50, max(0, (sa_d - la_d)/max(sa_d,1)*50)) +
+                               min(50, max(0, moy_sci_d/20*50))) if serie_preview=="C"
+                        else (min(50, max(0, (la_d - sa_d)/max(la_d,1)*50)) +
+                               min(50, max(0, moy_lit_d/20*50))), 0)
+                    ))
+                    col_prev = "#10b981" if serie_preview=="C" else "#3b82f6"
+                    ok_bg = "#ecfdf5" if seuil_ok else "#fff7ed"
+                    ok_col = "#065f46" if seuil_ok else "#92400e"
+                    prio_badge = ""
+                    if _prio_C or _prio_A:
+                        prio_badge = f"<div style='font-size:0.78rem;margin-top:0.4rem;color:#7c3aed;font-weight:600;'>🎯 {raison_preview}</div>"
+                    st.markdown(f"""
+                    <div style="background:{ok_bg};border-radius:12px;padding:0.9rem 1.2rem;
+                                border:2px dashed {col_prev};margin-top:0.2rem;">
+                        <div style="font-size:0.85rem;font-weight:700;color:{ok_col};">
+                            🤖 Prévisualisation Diagnostic IA
+                        </div>
+                        <div style="margin-top:0.4rem;font-size:0.82rem;color:{ok_col};">
+                            Série recommandée : <strong style="color:{col_prev};font-size:1rem;">
+                            Série {serie_preview}</strong> &nbsp;·&nbsp;
+                            Statut : <strong>{"CONFIRMÉ ✅" if seuil_ok else "EN ATTENTE ⏳"}</strong>
+                            &nbsp;·&nbsp; Confiance : <strong>{conf_preview}%</strong>
+                        </div>
+                        {prio_badge}
+                    </div>
+                    """, unsafe_allow_html=True)
 
-    try:
-        all_exp = []
-        for s in ["confirme","revise","attente","probation","indetermine"]:
-            for dd in db.lister_dossiers(s):
-                dd["_statut_affiche"] = s
-                all_exp.append(dd)
-        stats_exp = db.statistiques()
-    except Exception:
-        all_exp = []; stats_exp = {}
+                    st.write("")
+                    if st.button(f"🚀 Lancer le Diagnostic et Sauvegarder",
+                                 use_container_width=True, type="primary",
+                                 key=f"diag_{uid_diag}"):
+                        # Construire le dossier complet
+                        base = dict(dossier_ex) if dossier_ex else {}
+                        base.update({
+                            "nom":              nom_i,
+                            "prenom":           prenom_i,
+                            "lycee":            lycee_i,
+                            "age":              base.get("age", ""),
+                            "sexe":             base.get("sexe", ""),
+                            "choix_personnel":  base.get("choix_personnel",""),
+                            "projet_pro":       base.get("projet_pro",""),
+                            "revenu":           base.get("revenu_famille",""),
+                            "revenu_famille":   base.get("revenu_famille",""),
+                            "SA_etal":          sa_d,  "SA_brut": sa_d,
+                            "LA_etal":          la_d,  "LA_brut": la_d,
+                            "maths_t1":    n_maths,  "sci_phy_t1": n_sciphy, "svt_t1":  n_svt,
+                            "francais_t1": n_fr,     "histgeo_t1": n_hg,     "anglais_t1": n_ang,
+                            "t1_renseigne":     True,
+                            "trimestre_actuel": "T1",
+                            "serie_cible":      serie_preview,
+                            "serie_provisoire": serie_preview,
+                            "serie_finale":     serie_preview if seuil_ok else None,
+                            "orientation_finale": serie_preview if seuil_ok else None,
+                            "statut":           statut_preview,
+                            "score_confiance":  conf_preview,
+                        })
+                        res_diag = db.sauvegarder_dossier(base, None)
+                        if res_diag.get("succes"):
+                            st.success(f"✅ Diagnostic lancé et dossier sauvegardé ! "
+                                       f"Orientation → **Série {serie_preview}** · "
+                                       f"Statut : **{statut_preview.upper()}**")
+                            rerun()
+                        else:
+                            st.error(f"❌ Erreur : {res_diag.get('message','inconnue')}")
 
-    e1, e2, e3, e4 = st.columns(4)
-    with e1:
+    # ──────────────────────────────────────────────────────────────
+    # ONGLET 2 : TOUS LES DOSSIERS
+    # ──────────────────────────────────────────────────────────────
+    with tab_dossiers:
+        # ── Filtres ──
+        fc1, fc2, fc3 = st.columns([2, 1, 1])
+        with fc1:
+            search_q = st.text_input("🔍 Rechercher (nom ou prénom)",
+                                      placeholder="Ex : MBALLA, Jean...", key="dash_search")
+        with fc2:
+            filtre_statut = st.selectbox("Statut",
+                ["Tous","confirme","revise","attente","probation","indetermine"], key="dash_filtre")
+        with fc3:
+            filtre_serie = st.selectbox("Série", ["Toutes","C","A","?"], key="dash_serie")
+
+        # ── Chargement données ──
         try:
-            xlsx = generer_excel_export(all_exp)
-            if xlsx:
-                st.download_button("📊 Excel (.xlsx)", xlsx,
-                    file_name=f"capavenir_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True)
-            else:
-                st.caption("Installer openpyxl")
-        except Exception as ex:
-            st.caption(f"Erreur Excel: {ex}")
-    with e2:
+            statuts_a_lister = (["confirme","revise","attente","probation","indetermine"]
+                                if filtre_statut == "Tous" else [filtre_statut])
+            tous_dossiers = []
+            for s in statuts_a_lister:
+                for d in db.lister_dossiers(s):
+                    d["_statut_affiche"] = s
+                    tous_dossiers.append(d)
+        except Exception as e:
+            st.error(f"Erreur lecture BDD : {e}")
+            tous_dossiers = []
+
+        if search_q.strip():
+            q = search_q.strip().upper()
+            tous_dossiers = [d for d in tous_dossiers if
+                             q in (d.get("nom","") or "").upper() or
+                             q in (d.get("prenom","") or "").upper()]
+        if filtre_serie != "Toutes":
+            tous_dossiers = [d for d in tous_dossiers if
+                             (d.get("serie_finale") or d.get("serie_provisoire") or
+                              d.get("serie_cible") or "?") == filtre_serie]
+
+        # ── Tableau ──
+        st.markdown(f"**{len(tous_dossiers)} dossier(s) trouvé(s)**")
+        if not tous_dossiers:
+            st.info("Aucun dossier ne correspond aux critères.")
+        else:
+            h_cols = st.columns([2.5, 2.2, 2, 1.2, 1.2, 1.5, 1.8, 1.8])
+            for col, lbl in zip(h_cols, ["Nom & Prénom","Lycée","Projet","SA","LA","Série","Statut","Date"]):
+                col.markdown(f"<div style='font-size:0.7rem;font-weight:700;text-transform:uppercase;"
+                             f"opacity:0.5;letter-spacing:0.06em;'>{lbl}</div>", unsafe_allow_html=True)
+            st.markdown("<hr style='margin:0.2rem 0 0.4rem;opacity:0.2;'>", unsafe_allow_html=True)
+            for d in tous_dossiers:
+                stat_af = d.get("_statut_affiche","—")
+                _, _, _, s_badge = STATUT_META.get(stat_af, ("","#6b7280","#f3f4f6","badge-indetermine"))
+                serie_af = (d.get("serie_finale") or d.get("serie_provisoire") or
+                            d.get("serie_cible") or "?")
+                badge_serie = "badge-c" if serie_af=="C" else ("badge-a" if serie_af=="A" else "")
+                sa_v = float(d.get("SA_etal") or d.get("SA_brut") or 0)
+                la_v = float(d.get("LA_etal") or d.get("LA_brut") or 0)
+                rc = st.columns([2.5, 2.2, 2, 1.2, 1.2, 1.5, 1.8, 1.8])
+                rc[0].markdown(f"**{(d.get('nom') or '').upper()}** {(d.get('prenom') or '').capitalize()}")
+                rc[1].markdown(f"<small>{(d.get('lycee') or '—')[:22]}</small>", unsafe_allow_html=True)
+                rc[2].markdown(f"<small>{(d.get('projet_pro') or '—')[:20]}</small>", unsafe_allow_html=True)
+                rc[3].markdown(f"<b style='color:#10b981;'>{sa_v:.1f}</b>", unsafe_allow_html=True)
+                rc[4].markdown(f"<b style='color:#3b82f6;'>{la_v:.1f}</b>", unsafe_allow_html=True)
+                rc[5].markdown(f'<span class="dash-badge {badge_serie}">{serie_af}</span>', unsafe_allow_html=True)
+                rc[6].markdown(f'<span class="dash-badge {s_badge}">{stat_af}</span>', unsafe_allow_html=True)
+                rc[7].markdown(f"<small style='opacity:0.5;'>{(d.get('date_modification','') or '')[:10]}</small>", unsafe_allow_html=True)
+                st.markdown("<div style='border-bottom:1px solid rgba(0,0,0,0.05);margin:0.1rem 0;'></div>", unsafe_allow_html=True)
+
+
+    # ──────────────────────────────────────────────────────────────
+    # ONGLET 3 : SUIVI T2/T3
+    # ──────────────────────────────────────────────────────────────
+    with tab_suivi:
+        # ── Mise à jour T2/T3 pour dossiers non confirmés ──
+        st.divider()
+        st.markdown("#### 📝 Saisir les notes T2/T3 — Dossiers en attente / probation")
+        non_conf = [d for d in tous_dossiers if d.get("_statut_affiche") in ("attente","probation")]
+        if not non_conf:
+            st.info("Aucun dossier en attente ou en probation dans cette vue.")
+        else:
+            for d in non_conf:
+                nom_d    = (d.get("nom","") or "").upper()
+                prenom_d = (d.get("prenom","") or "").capitalize()
+                stat_d   = d.get("_statut_affiche","")
+                sa_d     = float(d.get("SA_etal") or d.get("SA_brut") or 0)
+                la_d     = float(d.get("LA_etal") or d.get("LA_brut") or 0)
+                trim_a   = d.get("trimestre_actuel") or d.get("trimestre_decision","T1")
+                prochain = "T2" if trim_a == "T1" else "T3"
+                uid      = f"{d.get('id',0)}_{nom_d}"
+
+                with st.expander(f"📋 {nom_d} {prenom_d} — {stat_d.upper()} → Saisir notes {prochain}"):
+                    st.markdown(f"SA={sa_d:.1f}/20 · LA={la_d:.1f}/20 · Trimestre actuel : {trim_a}")
+                    ca, cb = st.columns(2)
+                    with ca:
+                        st.markdown("**🔬 Matières scientifiques**")
+                        mths = st.number_input(f"Maths {prochain}", 0.0, 20.0,
+                            float(d.get(f"maths_{prochain.lower()}") or 10.0), 0.5, key=f"mths_{uid}")
+                        sphy = st.number_input(f"Sci.Phy {prochain}", 0.0, 20.0,
+                            float(d.get(f"sci_phy_{prochain.lower()}") or 10.0), 0.5, key=f"sphy_{uid}")
+                        svtv = st.number_input(f"SVT {prochain}", 0.0, 20.0,
+                            float(d.get(f"svt_{prochain.lower()}") or 10.0), 0.5, key=f"svtv_{uid}")
+                        msc  = round((mths+sphy+svtv)/3, 2)
+                        st.metric(f"Moy. Sci. {prochain}", f"{msc:.2f}/20",
+                                  delta=f"{msc-10:+.1f} vs seuil")
+                    with cb:
+                        st.markdown("**📖 Matières littéraires**")
+                        frv  = st.number_input(f"Français {prochain}", 0.0, 20.0,
+                            float(d.get(f"francais_{prochain.lower()}") or 10.0), 0.5, key=f"frv_{uid}")
+                        hgv  = st.number_input(f"Hist-Géo {prochain}", 0.0, 20.0,
+                            float(d.get(f"histgeo_{prochain.lower()}") or 10.0), 0.5, key=f"hgv_{uid}")
+                        angv = st.number_input(f"Anglais {prochain}", 0.0, 20.0,
+                            float(d.get(f"anglais_{prochain.lower()}") or 10.0), 0.5, key=f"angv_{uid}")
+                        mlt  = round((frv+hgv+angv)/3, 2)
+                        st.metric(f"Moy. Lit. {prochain}", f"{mlt:.2f}/20",
+                                  delta=f"{mlt-10:+.1f} vs seuil")
+
+                    # Calcul automatique nouveau statut
+                    serie_v   = (d.get("serie_finale") or d.get("serie_provisoire") or
+                                 d.get("serie_cible") or "C")
+                    cond_ok   = (msc >= 10) if sa_d >= la_d else (mlt >= 10)
+                    if stat_d == "attente":
+                        new_stat = "confirme" if cond_ok else "probation"
+                        new_lbl  = "✅ CONFIRMÉ" if cond_ok else "⚠️ PROBATION"
+                    else:
+                        new_stat = "confirme" if cond_ok else "revise"
+                        serie_v  = serie_v if cond_ok else ("A" if serie_v=="C" else "C")
+                        new_lbl  = "✅ CONFIRMÉ" if cond_ok else f"🔄 RÉVISÉ → Série {serie_v}"
+                    ok_c = "#10b981" if cond_ok else "#ef4444"
+                    ok_bg= "#ecfdf5" if cond_ok else "#fef2f2"
+                    st.markdown(f"""
+                    <div style="background:{ok_bg};border:1.5px solid {ok_c};border-radius:10px;
+                                padding:0.6rem 1rem;text-align:center;font-weight:700;
+                                color:{ok_c};margin:0.5rem 0;">
+                        Nouveau statut prévu : {new_lbl}
+                    </div>""", unsafe_allow_html=True)
+
+                    if st.button(f"✅ Valider et mettre à jour dans la BDD",
+                                 use_container_width=True, type="primary",
+                                 key=f"val_{uid}"):
+                        ss_upd = dict(d)
+                        tk = prochain.lower()
+                        ss_upd[f"maths_{tk}"]   = mths
+                        ss_upd[f"sci_phy_{tk}"] = sphy
+                        ss_upd[f"svt_{tk}"]     = svtv
+                        ss_upd[f"francais_{tk}"]= frv
+                        ss_upd[f"histgeo_{tk}"] = hgv
+                        ss_upd[f"anglais_{tk}"] = angv
+                        ss_upd[f"t{prochain[1]}_renseigne"] = True
+                        ss_upd["statut"]            = new_stat
+                        ss_upd["orientation_finale"]= serie_v
+                        ss_upd["revenu"]            = d.get("revenu_famille","")
+                        res_upd = db.sauvegarder_dossier(ss_upd, None)
+                        if res_upd["succes"]:
+                            st.success(f"✅ Statut mis à jour → **{new_stat.upper()}** · {res_upd['message']}")
+                            rerun()
+                        else:
+                            st.error(res_upd["message"])
+
+
+    # ──────────────────────────────────────────────────────────────
+    # ONGLET 4 : EXPORTS
+    # ──────────────────────────────────────────────────────────────
+    with tab_exports:
+        # ── Exports multi-formats ──
+        st.divider()
+        st.markdown("#### 📤 Exports")
+
         try:
-            docx_b = generer_word_export(all_exp, stats_exp)
-            if docx_b:
-                st.download_button("📝 Word (.docx)", docx_b,
-                    file_name=f"capavenir_{datetime.now().strftime('%Y%m%d')}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True)
-            else:
-                st.caption("Installer python-docx")
-        except Exception as ex:
-            st.caption(f"Erreur Word: {ex}")
-    with e3:
-        try:
-            pdf_b = generer_pdf_rapport(all_exp, stats_exp)
-            st.download_button("📄 PDF Rapport", pdf_b,
-                file_name=f"rapport_capavenir_{datetime.now().strftime('%Y%m%d')}.pdf",
-                mime="application/pdf", use_container_width=True)
-        except Exception as ex:
-            st.caption(f"Erreur PDF: {ex}")
-    with e4:
-        try:
-            j_data = db.exporter_json()
-            st.download_button("📦 JSON", j_data,
-                file_name=f"capavenir_{datetime.now().strftime('%Y%m%d')}.json",
-                mime="application/json", use_container_width=True)
+            all_exp = []
+            for s in ["confirme","revise","attente","probation","indetermine"]:
+                for dd in db.lister_dossiers(s):
+                    dd["_statut_affiche"] = s
+                    all_exp.append(dd)
+            stats_exp = db.statistiques()
         except Exception:
-            st.caption("Export indisponible")
+            all_exp = []; stats_exp = {}
+
+        e1, e2, e3, e4 = st.columns(4)
+        with e1:
+            try:
+                xlsx = generer_excel_export(all_exp)
+                if xlsx:
+                    st.download_button("📊 Excel (.xlsx)", xlsx,
+                        file_name=f"capavenir_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True)
+                else:
+                    st.caption("Installer openpyxl")
+            except Exception as ex:
+                st.caption(f"Erreur Excel: {ex}")
+        with e2:
+            try:
+                docx_b = generer_word_export(all_exp, stats_exp)
+                if docx_b:
+                    st.download_button("📝 Word (.docx)", docx_b,
+                        file_name=f"capavenir_{datetime.now().strftime('%Y%m%d')}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        use_container_width=True)
+                else:
+                    st.caption("Installer python-docx")
+            except Exception as ex:
+                st.caption(f"Erreur Word: {ex}")
+        with e3:
+            try:
+                pdf_b = generer_pdf_rapport(all_exp, stats_exp)
+                st.download_button("📄 PDF Rapport", pdf_b,
+                    file_name=f"rapport_capavenir_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    mime="application/pdf", use_container_width=True)
+            except Exception as ex:
+                st.caption(f"Erreur PDF: {ex}")
+        with e4:
+            try:
+                j_data = db.exporter_json()
+                st.download_button("📦 JSON", j_data,
+                    file_name=f"capavenir_{datetime.now().strftime('%Y%m%d')}.json",
+                    mime="application/json", use_container_width=True)
+            except Exception:
+                st.caption("Export indisponible")
 
 
 # =====================================================================
@@ -2697,23 +2559,67 @@ def afficher_espace_eleve():
                 for q_idx, q in enumerate(tdata["questions"]):
                     st.markdown(f'<div class="test-question"><strong>Q{q_idx+1}.</strong> {q["q"]}</div>', unsafe_allow_html=True)
                     prev_e = st.session_state[eleve_key].get(q_idx)
-                    idx_def_e = q["choices"].index(prev_e) if prev_e in q["choices"] else 0
+                    # Aucune réponse présélectionnée : index=None si rien encore choisi
+                    idx_def_e = q["choices"].index(prev_e) if prev_e in q["choices"] else None
                     ch_e = st.radio(
                         f"Eleve_R{q_idx+1}_{t_key}",
                         q["choices"], index=idx_def_e,
                         key=f"eleve_q_{t_key}_{q_idx}",
                         label_visibility="collapsed"
                     )
-                    st.session_state[eleve_key][q_idx] = ch_e
-                    if ch_e == q["answer"]:
-                        nb_correct_e += 1
-                nb_rep_e = sum(1 for v in st.session_state[eleve_key].values() if v)
+                    if ch_e is not None:
+                        st.session_state[eleve_key][q_idx] = ch_e
+                        if ch_e == q["answer"]:
+                            nb_correct_e += 1
+                nb_rep_e = sum(1 for v in st.session_state[eleve_key].values() if v is not None)
                 total_e  = len(tdata["questions"])
                 if nb_rep_e >= total_e:
-                    # Stocker dans les variables de session principales (score caché)
-                    score_e = round((nb_correct_e / total_e) * 20, 1)
-                    st.session_state[f"eleve_score_{t_key}"] = score_e
+                    # Score brut = nb bonnes réponses sur total_e questions
+                    score_brut_e = nb_correct_e          # ex. 28 sur 40
+                    # Score étalonnée = ramené sur 20
+                    score_etal_e = round((score_brut_e / total_e) * 20, 1)
+                    # Stocker dans les variables de session (score étalonnée)
+                    st.session_state[f"eleve_score_{t_key}"]      = score_etal_e
+                    st.session_state[f"eleve_score_brut_{t_key}"] = score_brut_e
                     st.markdown(f'<div class="alert-success">✅ Test {t_key} complété — {total_e} réponses enregistrées.</div>', unsafe_allow_html=True)
+                    # ── Résultats visibles par l'élève (sans correction) ──
+                    st.markdown(f"""
+                    <div style="background:linear-gradient(135deg,#ecfdf5,#d1fae5);
+                                border-left:4px solid #10b981;border-radius:12px;
+                                padding:1rem 1.4rem;margin-top:0.5rem;">
+                        <div style="font-weight:700;color:#065f46;font-size:0.95rem;margin-bottom:0.6rem;">
+                            📊 Vos résultats — Test {t_key}
+                        </div>
+                        <div style="display:flex;gap:2.5rem;flex-wrap:wrap;">
+                            <div>
+                                <div style="font-size:0.72rem;color:#047857;text-transform:uppercase;
+                                            letter-spacing:.06em;font-weight:600;">Score brut</div>
+                                <div style="font-size:1.6rem;font-weight:800;color:#065f46;line-height:1.1;">
+                                    {score_brut_e}<span style="font-size:0.9rem;font-weight:500;
+                                    color:#047857;">/{total_e} pts</span>
+                                </div>
+                            </div>
+                            <div>
+                                <div style="font-size:0.72rem;color:#047857;text-transform:uppercase;
+                                            letter-spacing:.06em;font-weight:600;">Score étalonnée</div>
+                                <div style="font-size:1.6rem;font-weight:800;color:#065f46;line-height:1.1;">
+                                    {score_etal_e}<span style="font-size:0.9rem;font-weight:500;
+                                    color:#047857;">/20</span>
+                                </div>
+                            </div>
+                            <div>
+                                <div style="font-size:0.72rem;color:#047857;text-transform:uppercase;
+                                            letter-spacing:.06em;font-weight:600;">Taux</div>
+                                <div style="font-size:1.6rem;font-weight:800;color:#065f46;line-height:1.1;">
+                                    {round(score_brut_e/total_e*100)}%
+                                </div>
+                            </div>
+                        </div>
+                        <div style="margin-top:0.8rem;font-size:0.78rem;color:#047857;opacity:0.8;">
+                            ℹ️ La correction détaillée est réservée à votre Conseiller d'Orientation.
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
                 else:
                     st.markdown(f'<div class="alert-warning">📝 {nb_rep_e}/{total_e} questions répondues.</div>', unsafe_allow_html=True)
 
@@ -2937,6 +2843,580 @@ def afficher_espace_eleve():
     st.info("📌 Pour toute question sur ton orientation, contacte ton Conseiller d'Orientation au lycée.")
 
 # =====================================================================
+# PAGE D'ACCUEIL — Sélection et inscription élève / conseiller
+# =====================================================================
+def afficher_page_accueil():
+    """Page d'accueil avec sélection du mode et inscription."""
+
+    dark = st.session_state.get("dark_mode", False)
+    txt_color  = "#e2e8f0" if dark else "#1e1b4b"
+    card_bg    = "linear-gradient(145deg,#1e293b,#141b2d)" if dark else "linear-gradient(145deg,#ffffff,#f8fafc)"
+    card_brd   = "#334155" if dark else "#e5e7eb"
+
+    sous_mode = st.session_state.get("accueil_sous_mode")
+
+    # ── ÉCRAN DE CHOIX ──────────────────────────────────────────────
+    if sous_mode is None:
+        st.markdown(f"""
+        <div style="text-align:center; padding:2rem 1rem 1.5rem;">
+            <div style="font-size:1.1rem; color:{txt_color}; opacity:0.7; font-weight:500;">
+                Bienvenue sur CapAvenir CMR — Système Intelligent d'Orientation Scolaire
+            </div>
+            <div style="font-size:0.9rem; margin-top:0.4rem; opacity:0.5; color:{txt_color};">
+                Choisissez votre profil pour commencer
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        col_gap, col1, col_mid, col2, col_gap2 = st.columns([0.5, 3, 0.8, 3, 0.5])
+
+        with col1:
+            st.markdown(f"""
+            <div style="
+                background:{card_bg};
+                border: 2px solid #10b981;
+                border-radius: 24px;
+                padding: 2.5rem 1.5rem;
+                text-align: center;
+                box-shadow: 0 8px 32px rgba(16,185,129,0.18);
+                transition: all 0.3s ease;
+                cursor: pointer;
+            ">
+                <div style="font-size: 3.5rem; margin-bottom:0.8rem;">🎒</div>
+                <div style="font-size: 1.4rem; font-weight: 800; color: #10b981; margin-bottom:0.5rem;">
+                    Je suis Élève
+                </div>
+                <div style="font-size: 0.85rem; color:{txt_color}; opacity:0.7; line-height:1.5;">
+                    Accède à ton dossier d'orientation, passe les tests psychotechniques
+                    et consulte tes résultats.
+                </div>
+                <div style="margin-top:1.2rem; background:#10b981; color:white; padding:0.55rem 1.5rem;
+                            border-radius:12px; font-weight:700; display:inline-block; font-size:0.9rem;">
+                    → Continuer
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.write("")
+            if st.button("🎒 Accès Élève", use_container_width=True, type="primary", key="btn_mode_eleve"):
+                st.session_state.mode_accueil = "eleve"
+                st.session_state.accueil_sous_mode = "choix_eleve"
+                rerun()
+
+        with col2:
+            st.markdown(f"""
+            <div style="
+                background:{card_bg};
+                border: 2px solid #6d28d9;
+                border-radius: 24px;
+                padding: 2.5rem 1.5rem;
+                text-align: center;
+                box-shadow: 0 8px 32px rgba(109,40,217,0.18);
+                transition: all 0.3s ease;
+                cursor: pointer;
+            ">
+                <div style="font-size: 3.5rem; margin-bottom:0.8rem;">📋</div>
+                <div style="font-size: 1.4rem; font-weight: 800; color: #6d28d9; margin-bottom:0.5rem;">
+                    Je suis Conseiller
+                </div>
+                <div style="font-size: 0.85rem; color:{txt_color}; opacity:0.7; line-height:1.5;">
+                    Gérez les dossiers d'orientation, saisissez les notes et consultez
+                    le tableau de bord.
+                </div>
+                <div style="margin-top:1.2rem; background:#6d28d9; color:white; padding:0.55rem 1.5rem;
+                            border-radius:12px; font-weight:700; display:inline-block; font-size:0.9rem;">
+                    → Continuer
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.write("")
+            if st.button("📋 Accès Conseiller", use_container_width=True, key="btn_mode_conseiller"):
+                st.session_state.mode_accueil = "conseiller"
+                st.session_state.accueil_sous_mode = "choix_conseiller"
+                rerun()
+
+        st.write("")
+        st.markdown(f"""
+        <div style="text-align:center; font-size:0.78rem; color:{txt_color}; opacity:0.4; margin-top:1rem;">
+            CapAvenir CMR v2.5 · Mémoire ENS Informatique Niv. 5 · Orientation 3ᵉ → 2nde Cameroun
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    # ── CHOIX ÉLÈVE : Nouveau ou Dossier existant ───────────────────
+    if sous_mode == "choix_eleve":
+        if st.button("← Retour", key="retour_choix_eleve"):
+            st.session_state.accueil_sous_mode = None
+            st.session_state.mode_accueil = "accueil"
+            rerun()
+
+        st.markdown(f"""
+        <div style="text-align:center; padding:1.2rem 0 0.5rem;">
+            <div style="font-size:1.6rem; font-weight:800; color:#10b981;">🎒 Espace Élève</div>
+            <div style="font-size:0.88rem; opacity:0.65; color:{txt_color}; margin-top:0.3rem;">
+                Comment souhaitez-vous accéder à votre espace ?
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.write("")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(f"""
+            <div style="background:{card_bg}; border:2px solid #10b981; border-radius:18px;
+                        padding:2rem 1.2rem; text-align:center;
+                        box-shadow:0 4px 16px rgba(16,185,129,0.15);">
+                <div style="font-size:2.4rem;">✨</div>
+                <div style="font-size:1.1rem; font-weight:700; color:#10b981; margin:0.4rem 0;">
+                    Nouvelle Inscription
+                </div>
+                <div style="font-size:0.8rem; color:{txt_color}; opacity:0.65; line-height:1.5;">
+                    Première visite ? Créez votre profil et commencez les tests psychotechniques.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.write("")
+            if st.button("✨ M'inscrire", use_container_width=True, type="primary", key="btn_inscription_eleve"):
+                st.session_state.accueil_sous_mode = "inscription_eleve"
+                rerun()
+
+        with c2:
+            st.markdown(f"""
+            <div style="background:{card_bg}; border:2px solid #3b82f6; border-radius:18px;
+                        padding:2rem 1.2rem; text-align:center;
+                        box-shadow:0 4px 16px rgba(59,130,246,0.15);">
+                <div style="font-size:2.4rem;">🔍</div>
+                <div style="font-size:1.1rem; font-weight:700; color:#3b82f6; margin:0.4rem 0;">
+                    Accéder à mon Dossier
+                </div>
+                <div style="font-size:0.8rem; color:{txt_color}; opacity:0.65; line-height:1.5;">
+                    Déjà inscrit ? Retrouvez votre dossier et consultez vos résultats d'orientation.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.write("")
+            if st.button("🔍 Mon Dossier", use_container_width=True, key="btn_dossier_eleve"):
+                st.session_state.accueil_sous_mode = "dossier_eleve"
+                rerun()
+        return
+
+    # ── INSCRIPTION ÉLÈVE ───────────────────────────────────────────
+    if sous_mode == "inscription_eleve":
+        if st.button("← Retour", key="retour_inscription"):
+            st.session_state.accueil_sous_mode = "choix_eleve"
+            rerun()
+
+        st.markdown(f"""
+        <div style="text-align:center; padding:0.8rem 0 1.2rem;">
+            <div style="font-size:1.5rem; font-weight:800; color:#10b981;">✨ Nouvelle Inscription — Élève</div>
+            <div style="font-size:0.85rem; opacity:0.6; color:{txt_color}; margin-top:0.3rem;">
+                Renseignez vos informations pour créer votre profil d'orientation
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.form("form_inscription_eleve", clear_on_submit=False):
+            st.markdown("#### 👤 Identité")
+            r1c1, r1c2 = st.columns(2)
+            with r1c1:
+                ins_nom    = st.text_input("Nom de famille *", placeholder="Ex : MBALLA")
+                ins_age    = st.number_input("Âge *", min_value=12, max_value=20, value=15)
+                ins_lycee  = st.text_input("Lycée / Établissement *", placeholder="Ex : Lycée de Douala")
+            with r1c2:
+                ins_prenom = st.text_input("Prénom *", placeholder="Ex : Jean")
+                ins_sexe   = st.selectbox("Sexe *", ["Masculin", "Féminin"])
+
+            st.markdown("#### 🔑 Identifiants de connexion")
+            p1, p2 = st.columns(2)
+            with p1:
+                ins_pwd  = st.text_input("Mot de passe *", type="password",
+                                          placeholder="Choisissez un mot de passe sécurisé",
+                                          help="Ce mot de passe vous permettra de vous reconnecter pour consulter votre dossier.")
+            with p2:
+                ins_pwd2 = st.text_input("Confirmer le mot de passe *", type="password",
+                                          placeholder="Répétez le même mot de passe")
+
+            st.markdown("#### 🎯 Projet & Contexte")
+            r2c1, r2c2 = st.columns(2)
+            with r2c1:
+                ins_choix = st.selectbox(
+                    "Série souhaitée",
+                    ["C (Scientifique)", "A (Littéraire)", "Indécis(e)"]
+                )
+                ins_projet = st.text_area(
+                    "Projet professionnel",
+                    placeholder="Ex: Devenir médecin, ingénieur, avocat...",
+                    height=80,
+                )
+            with r2c2:
+                ins_revenu = st.selectbox(
+                    "Revenu mensuel estimé des parents",
+                    ["Faible (< 50 000 FCFA/mois)",
+                     "Moyen (50 000 - 150 000 FCFA/mois)",
+                     "Élevé (> 150 000 FCFA/mois)"]
+                )
+                st.markdown("""
+                <div style="background:linear-gradient(135deg,#fdf4ff,#ede9fe);
+                            border-left:4px solid #a855f7; border-radius:10px;
+                            padding:0.8rem 1rem; margin-top:0.5rem; font-size:0.8rem; color:#581c87;">
+                    📌 <strong>Note :</strong> Votre dossier sera examiné par un Conseiller
+                    d'Orientation qui saisira vos notes et passera vos tests avec vous.
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.write("")
+            submitted_ins = st.form_submit_button(
+                "✅ Créer mon profil et accéder à mes tests",
+                use_container_width=True, type="primary"
+            )
+
+        if submitted_ins:
+            if not ins_nom.strip() or not ins_prenom.strip() or not ins_lycee.strip():
+                st.error("⚠️ Veuillez renseigner votre nom, prénom et lycée.")
+            elif not ins_pwd:
+                st.error("⚠️ Veuillez choisir un mot de passe.")
+            elif len(ins_pwd) < 6:
+                st.error("⚠️ Le mot de passe doit contenir au moins 6 caractères.")
+            elif ins_pwd != ins_pwd2:
+                st.error("⚠️ Les deux mots de passe ne correspondent pas.")
+            else:
+                # Enregistrement des identifiants en base
+                _save_eleve_credential(ins_nom.strip(), ins_prenom.strip(),
+                                       ins_lycee.strip(), ins_pwd)
+                # Pré-remplissage du session_state avec les données d'inscription
+                st.session_state.nom              = ins_nom.strip().upper()
+                st.session_state.prenom           = ins_prenom.strip().capitalize()
+                st.session_state.age              = int(ins_age)
+                st.session_state.sexe             = ins_sexe
+                st.session_state.lycee            = ins_lycee.strip()
+                st.session_state.choix_personnel  = ins_choix
+                st.session_state.projet_pro       = ins_projet.strip()
+                st.session_state.revenu           = ins_revenu
+                st.session_state.eleve_inscrit    = True
+                st.session_state.mode_accueil     = "eleve"
+                st.session_state.accueil_sous_mode= "espace_tests"
+                rerun()
+        return
+
+    # ── ESPACE TESTS APRÈS INSCRIPTION ─────────────────────────────
+    if sous_mode == "espace_tests":
+        prenom_e = st.session_state.get("prenom", "")
+        nom_e    = st.session_state.get("nom", "")
+
+        st.markdown(f"""
+        <div style="background:linear-gradient(135deg,#ecfdf5,#d1fae5);
+                    border-left:5px solid #10b981; border-radius:16px;
+                    padding:1.5rem 2rem; margin-bottom:1.5rem;">
+            <div style="font-size:1.3rem; font-weight:800; color:#065f46;">
+                🎉 Bienvenue, {prenom_e} {nom_e} !
+            </div>
+            <div style="color:#047857; font-size:0.88rem; margin-top:0.5rem; line-height:1.6;">
+                Votre profil a été créé. Voici la suite de votre parcours d'orientation :
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("#### 📋 Votre parcours d'orientation")
+        e1, e2, e3 = st.columns(3)
+        with e1:
+            st.markdown("""
+            <div style="background:linear-gradient(135deg,#d1fae5,#a7f3d0);
+                        border-radius:14px; padding:1.2rem; text-align:center;">
+                <div style="font-size:1.8rem;">🧪</div>
+                <div style="font-weight:700; color:#065f46; margin:0.3rem 0;">Tests Psychotechniques</div>
+                <div style="font-size:0.78rem; color:#047857;">
+                    Passez les 5 tests (D48, KRX, MECA, BV11, PRC) avec votre conseiller.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        with e2:
+            st.markdown("""
+            <div style="background:linear-gradient(135deg,#dbeafe,#bfdbfe);
+                        border-radius:14px; padding:1.2rem; text-align:center;">
+                <div style="font-size:1.8rem;">📚</div>
+                <div style="font-weight:700; color:#1e3a8a; margin:0.3rem 0;">Notes Scolaires</div>
+                <div style="font-size:0.78rem; color:#1e40af;">
+                    Votre conseiller saisira vos notes des trimestres dans votre dossier.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        with e3:
+            st.markdown("""
+            <div style="background:linear-gradient(135deg,#f3e8ff,#ddd6fe);
+                        border-radius:14px; padding:1.2rem; text-align:center;">
+                <div style="font-size:1.8rem;">🎓</div>
+                <div style="font-weight:700; color:#4c1d95; margin:0.3rem 0;">Orientation IA</div>
+                <div style="font-size:0.78rem; color:#5b21b6;">
+                    Recevez votre orientation personnalisée : Série C ou Série A.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.write("")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("🧪 Passer les tests psychotechniques maintenant",
+                         use_container_width=True, type="primary", key="btn_goto_tests"):
+                # Redirection vers l'espace élève (passation des tests)
+                st.session_state.show_espace_eleve = True
+                st.session_state.eleve_dossier_actif = {
+                    "nom": st.session_state.nom,
+                    "prenom": st.session_state.prenom,
+                    "lycee": st.session_state.lycee,
+                    "age": st.session_state.age,
+                    "sexe": st.session_state.sexe,
+                    "choix_personnel": st.session_state.choix_personnel,
+                    "projet_pro": st.session_state.projet_pro,
+                    "revenu_famille": st.session_state.revenu,
+                    "serie_finale": None, "serie_provisoire": None, "serie_cible": None,
+                    "statut": "en cours", "score_confiance": 0,
+                    "SA_etal": 0, "LA_etal": 0,
+                    "trimestre_actuel": "T1",
+                }
+                st.session_state.mode_accueil = "skip"
+                rerun()
+        with col_b:
+            if st.button("🔍 Consulter mon dossier (si déjà créé)",
+                         use_container_width=True, key="btn_voir_dossier_apres_ins"):
+                st.session_state.accueil_sous_mode = "dossier_eleve"
+                rerun()
+
+        st.write("")
+        st.markdown("""
+        <div style="background:linear-gradient(135deg,#fff7ed,#fef3c7);
+                    border-left:4px solid #f59e0b; border-radius:12px;
+                    padding:1rem 1.2rem; font-size:0.83rem; color:#78350f;">
+            💡 <strong>Conseil :</strong> Rendez-vous auprès de votre Conseiller d'Orientation
+            au lycée pour effectuer la passation complète des tests et la saisie de vos notes.
+            Votre dossier sera ensuite disponible depuis cet espace.
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    # ── CONSULTER UN DOSSIER EXISTANT (depuis accueil élève) ────────
+    if sous_mode == "dossier_eleve":
+        if st.button("← Retour", key="retour_dossier_accueil"):
+            st.session_state.accueil_sous_mode = "choix_eleve"
+            rerun()
+
+        st.markdown(f"""
+        <div style="text-align:center; padding:0.8rem 0 1.2rem;">
+            <div style="font-size:1.5rem; font-weight:800; color:#3b82f6;">🔍 Connexion Élève</div>
+            <div style="font-size:0.85rem; opacity:0.6; color:{txt_color}; margin-top:0.3rem;">
+                Connectez-vous avec les identifiants créés lors de votre inscription
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Vérifier si l'élève a un compte avant tout
+        with st.form("form_login_eleve"):
+            fl1, fl2 = st.columns(2)
+            with fl1:
+                nom_search    = st.text_input("Nom de famille *", placeholder="Ex : MBALLA")
+                prenom_search = st.text_input("Prénom *", placeholder="Ex : Jean")
+            with fl2:
+                pwd_eleve = st.text_input("Mot de passe *", type="password",
+                                           placeholder="Votre mot de passe d'inscription")
+                st.markdown("""
+                <div style="background:linear-gradient(135deg,#eff6ff,#dbeafe);
+                            border-left:4px solid #3b82f6; border-radius:10px;
+                            padding:0.7rem 1rem; margin-top:0.5rem; font-size:0.78rem; color:#1e3a8a;">
+                    💡 Vous devez d'abord vous <strong>inscrire</strong> pour obtenir un mot de passe.
+                </div>
+                """, unsafe_allow_html=True)
+            chercher_acc = st.form_submit_button("🔓 Se connecter", use_container_width=True, type="primary")
+
+        if chercher_acc:
+            if not nom_search.strip() or not prenom_search.strip():
+                st.error("⚠️ Veuillez renseigner votre nom et prénom.")
+            elif not pwd_eleve:
+                st.error("⚠️ Veuillez saisir votre mot de passe.")
+            elif not _eleve_exists(nom_search.strip(), prenom_search.strip()):
+                st.markdown("""
+                <div style="background:linear-gradient(135deg,#fff7ed,#fed7aa);
+                            border-left:5px solid #f97316; border-radius:12px;
+                            padding:1rem 1.2rem; margin-top:0.5rem;">
+                    <strong>⚠️ Aucun compte trouvé pour ce nom.</strong><br>
+                    <span style="font-size:0.85rem;">
+                    Vous n'êtes pas encore inscrit(e) sur CapAvenir CMR.<br>
+                    Cliquez sur <strong>← Retour</strong> puis choisissez <strong>✨ Nouvelle Inscription</strong>.
+                    </span>
+                </div>
+                """, unsafe_allow_html=True)
+            elif not _verify_eleve_credential(nom_search.strip(), prenom_search.strip(), pwd_eleve):
+                st.error("❌ Mot de passe incorrect.")
+            else:
+                # Authentification réussie → rechercher le dossier en BDD
+                try:
+                    resultats = db.rechercher_eleve(nom_search.strip(), prenom_search.strip())
+                except Exception:
+                    resultats = []
+                if not resultats:
+                    # Pas encore de dossier en BDD, créer un dossier minimal
+                    st.session_state.nom    = nom_search.strip().upper()
+                    st.session_state.prenom = prenom_search.strip().capitalize()
+                    st.session_state.eleve_dossier_actif = {
+                        "nom": nom_search.strip().upper(),
+                        "prenom": prenom_search.strip().capitalize(),
+                        "lycee": "", "statut": "en cours",
+                        "serie_finale": None, "serie_provisoire": None, "serie_cible": None,
+                        "SA_etal": 0, "LA_etal": 0, "score_confiance": 0,
+                        "trimestre_actuel": "T1",
+                    }
+                    st.session_state.show_espace_eleve = True
+                    st.session_state.mode_accueil      = "skip"
+                    rerun()
+                else:
+                    st.session_state.eleve_dossier_actif = resultats[0]
+                    st.session_state.show_espace_eleve   = True
+                    st.session_state.mode_accueil        = "skip"
+                    rerun()
+        return
+
+    # ── CONSEILLER : Choix connexion ou inscription ──────────────────
+    if sous_mode == "choix_conseiller":
+        if st.button("← Retour", key="retour_choix_cons"):
+            st.session_state.accueil_sous_mode = None
+            st.session_state.mode_accueil = "accueil"
+            rerun()
+
+        st.markdown(f"""
+        <div style="text-align:center; padding:0.8rem 0 1.2rem;">
+            <div style="font-size:1.5rem; font-weight:800; color:#6d28d9;">📋 Espace Conseiller</div>
+            <div style="font-size:0.85rem; opacity:0.6; color:{txt_color}; margin-top:0.3rem;">
+                Conseiller d'Orientation — Accès réservé au personnel autorisé
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.write("")
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            st.markdown(f"""
+            <div style="background:{card_bg}; border:2px solid #6d28d9; border-radius:18px;
+                        padding:2rem 1.2rem; text-align:center;
+                        box-shadow:0 4px 16px rgba(109,40,217,0.15);">
+                <div style="font-size:2.4rem;">🔐</div>
+                <div style="font-size:1.1rem; font-weight:700; color:#6d28d9; margin:0.4rem 0;">
+                    Se Connecter
+                </div>
+                <div style="font-size:0.8rem; color:{txt_color}; opacity:0.65; line-height:1.5;">
+                    Vous avez déjà vos identifiants ? Connectez-vous pour accéder au tableau de bord.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.write("")
+            if st.button("🔐 Se connecter", use_container_width=True, type="primary", key="btn_login_cons"):
+                st.session_state.accueil_sous_mode = "login_conseiller"
+                rerun()
+        with cc2:
+            st.markdown(f"""
+            <div style="background:{card_bg}; border:2px solid #0ea5e9; border-radius:18px;
+                        padding:2rem 1.2rem; text-align:center;
+                        box-shadow:0 4px 16px rgba(14,165,233,0.15);">
+                <div style="font-size:2.4rem;">📝</div>
+                <div style="font-size:1.1rem; font-weight:700; color:#0ea5e9; margin:0.4rem 0;">
+                    Demander un Accès
+                </div>
+                <div style="font-size:0.8rem; color:{txt_color}; opacity:0.65; line-height:1.5;">
+                    Nouveau conseiller ? Soumettez une demande d'accès auprès de l'administrateur.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.write("")
+            if st.button("📝 Demander un accès", use_container_width=True, key="btn_demande_cons"):
+                st.session_state.accueil_sous_mode = "demande_conseiller"
+                rerun()
+        return
+
+    # ── CONNEXION CONSEILLER ────────────────────────────────────────
+    if sous_mode == "login_conseiller":
+        if st.button("← Retour", key="retour_login_cons"):
+            st.session_state.accueil_sous_mode = "choix_conseiller"
+            rerun()
+
+        st.markdown(f"""
+        <div style="text-align:center; padding:0.8rem 0 1.5rem;">
+            <div style="font-size:1.5rem; font-weight:800; color:#6d28d9;">🔐 Connexion Conseiller</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        _, form_col, _ = st.columns([1, 2, 1])
+        with form_col:
+            with st.form("form_login_conseiller_accueil"):
+                login_cons  = st.text_input("👤 Identifiant", placeholder="Votre identifiant")
+                pwd_cons    = st.text_input("🔑 Mot de passe", type="password", placeholder="••••••••")
+                btn_login   = st.form_submit_button("🔓 Se connecter", use_container_width=True, type="primary")
+
+            if btn_login:
+                if check_password(login_cons, pwd_cons):
+                    st.session_state.conseiller_auth    = True
+                    st.session_state.mode_conseiller_val= True
+                    st.session_state.login_error        = ""
+                    st.session_state.mode_accueil       = "skip"
+                    st.session_state.accueil_sous_mode  = None
+                    st.session_state.show_dashboard     = True
+                    rerun()
+                else:
+                    st.error("❌ Identifiant ou mot de passe incorrect.")
+
+        return
+
+    # ── DEMANDE D'ACCÈS CONSEILLER ──────────────────────────────────
+    if sous_mode == "demande_conseiller":
+        if st.button("← Retour", key="retour_demande_cons"):
+            st.session_state.accueil_sous_mode = "choix_conseiller"
+            rerun()
+
+        st.markdown(f"""
+        <div style="text-align:center; padding:0.8rem 0 1.2rem;">
+            <div style="font-size:1.5rem; font-weight:800; color:#0ea5e9;">📝 Demande d'Accès Conseiller</div>
+            <div style="font-size:0.85rem; opacity:0.6; color:{txt_color}; margin-top:0.3rem;">
+                Renseignez vos informations — un administrateur vous contactera pour valider votre accès
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.form("form_demande_conseiller"):
+            d1, d2 = st.columns(2)
+            with d1:
+                d_nom      = st.text_input("Nom *", placeholder="FOMO")
+                d_lycee    = st.text_input("Lycée / Établissement *", placeholder="Lycée de Douala")
+                d_email    = st.text_input("Email professionnel *", placeholder="contact@lycee.cm")
+            with d2:
+                d_prenom   = st.text_input("Prénom *", placeholder="Alice")
+                d_poste    = st.text_input("Poste occupé *", placeholder="Conseiller d'Orientation Principal")
+                d_tel      = st.text_input("Téléphone", placeholder="+237 6XX XXX XXX")
+            d_motif = st.text_area(
+                "Motif de la demande",
+                placeholder="Expliquez brièvement pourquoi vous souhaitez accéder à CapAvenir CMR...",
+                height=80
+            )
+            btn_dem = st.form_submit_button("📨 Envoyer la demande", use_container_width=True, type="primary")
+
+        if btn_dem:
+            if not d_nom.strip() or not d_prenom.strip() or not d_lycee.strip() or not d_email.strip():
+                st.error("⚠️ Veuillez remplir tous les champs obligatoires (*).")
+            else:
+                st.markdown(f"""
+                <div style="background:linear-gradient(135deg,#ecfdf5,#d1fae5);
+                            border-left:5px solid #10b981; border-radius:14px;
+                            padding:1.5rem 2rem; margin-top:1rem;">
+                    <div style="font-size:1.1rem; font-weight:700; color:#065f46; margin-bottom:0.5rem;">
+                        ✅ Demande envoyée avec succès !
+                    </div>
+                    <div style="color:#047857; font-size:0.88rem; line-height:1.6;">
+                        Votre demande d'accès pour <strong>{d_prenom.strip()} {d_nom.strip().upper()}</strong>
+                        ({d_lycee.strip()}) a bien été enregistrée.<br>
+                        L'administrateur système vous contactera à <strong>{d_email.strip()}</strong>
+                        dans les <strong>48h ouvrables</strong> pour vous communiquer vos identifiants.
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+        return
+
+
+# =====================================================================
 # NAVIGATION — Dashboard ou Orientation
 # =====================================================================
 
@@ -2946,6 +3426,11 @@ if st.session_state.get("show_login", False) and not st.session_state.get("conse
     st.stop()
 else:
     st.session_state.show_login = False
+
+# ── Page d'accueil (mode_accueil != "skip") ──
+if st.session_state.get("mode_accueil", "accueil") not in ("skip",):
+    afficher_page_accueil()
+    st.stop()
 
 # ── Espace Élève ──
 if st.session_state.get("show_espace_eleve", False):
@@ -3208,7 +3693,8 @@ elif step == 2:
                 for q_idx, q in enumerate(tdata["questions"]):
                     st.markdown(f'<div class="test-question"><strong>Q{q_idx+1}.</strong> {q["q"]}</div>', unsafe_allow_html=True)
                     prev = st.session_state.test_answers[t_key].get(q_idx)
-                    idx_default = q["choices"].index(prev) if prev in q["choices"] else 0
+                    # Aucune réponse présélectionnée : index=None si rien encore choisi
+                    idx_default = q["choices"].index(prev) if prev in q["choices"] else None
                     choice = st.radio(
                         f"R{q_idx+1}_{t_key}",
                         q["choices"],
@@ -3216,18 +3702,22 @@ elif step == 2:
                         key=f"q_{t_key}_{q_idx}",
                         label_visibility="collapsed"
                     )
-                    st.session_state.test_answers[t_key][q_idx] = choice
+                    if choice is not None:
+                        st.session_state.test_answers[t_key][q_idx] = choice
                     if choice == q["answer"]:
                         correct += 1
                     elif mode_conseiller and choice is not None:
                         st.caption(f"✅ Réponse correcte : {q['answer']} — {q['expl']}")
 
-                score = round((correct / len(tdata["questions"])) * 20, 1)
+                # Score brut = nb bonnes réponses sur le total de questions
+                total_q_c    = len(tdata["questions"])
+                score_brut_c = correct                              # ex. 15/20
+                score        = round((score_brut_c / total_q_c) * 20, 1)  # étalonnée /20
                 st.session_state.test_scores[t_key] = score
 
                 # Scores visibles UNIQUEMENT en mode conseiller
                 if mode_conseiller:
-                    st.success(f"Score : **{correct}/{len(tdata['questions'])}** réponses → **{score}/20** brut")
+                    st.success(f"Score : **{score_brut_c}/{total_q_c}** réponses (brut) → **{score}/20** (étalonnée)")
                 else:
                     nb_rep = sum(1 for v in st.session_state.test_answers[t_key].values() if v is not None)
                     total_q = len(tdata["questions"])
@@ -3347,8 +3837,49 @@ elif step == 3:
     SEUIL_BAS  = 9.0   # en dessous → attente / probation
     SEUIL_HAUT = 11.0  # au-dessus  → confirmé
 
+    # ══════════════════════════════════════════════════════════════════
+    # RÈGLE PRIORITAIRE — CHOIX DE L'ÉLÈVE
+    # Si l'élève a exprimé un choix de série ET que :
+    #   • son aptitude correspondante (SA pour C, LA pour A) ≥ 10/20
+    #   • ET sa moyenne scolaire correspondante ≥ 10/20
+    # → Son choix est validé définitivement, quelle que soit la
+    #   comparaison SA vs LA ou moy_sci vs moy_lit.
+    # Cette règle est évaluée EN PREMIER, avant tout autre cas.
+    # ══════════════════════════════════════════════════════════════════
+    choix_C = "C" in choix
+    choix_A = "A" in choix
+
+    # Conditions d'éligibilité au choix prioritaire
+    _choix_C_eligible = choix_C and SA >= 10.0 and moy_sci >= 10.0
+    _choix_A_eligible = choix_A and LA >= 10.0 and moy_lit >= 10.0
+
+    if _choix_C_eligible:
+        # L'élève veut la C, a l'aptitude sci ≥ 10 ET les notes sci ≥ 10
+        # → On respecte son choix quelle que soit la comparaison avec LA / moy_lit
+        serie      = "C"
+        statut     = "confirme"
+        msg_diag   = (
+            "✅ CHOIX VALIDÉ — Série C confirmée selon le projet de l'élève\n"
+            f"(SA={SA:.1f}/20 ≥ 10 · Moy.Sci={moy_sci:.1f}/20 ≥ 10)"
+        )
+        alerte_type= "success"
+
+    elif _choix_A_eligible:
+        # L'élève veut la A, a l'aptitude lit ≥ 10 ET les notes lit ≥ 10
+        serie      = "A"
+        statut     = "confirme"
+        msg_diag   = (
+            "✅ CHOIX VALIDÉ — Série A confirmée selon le projet de l'élève\n"
+            f"(LA={LA:.1f}/20 ≥ 10 · Moy.Lit={moy_lit:.1f}/20 ≥ 10)"
+        )
+        alerte_type= "success"
+
+    # ══════════════════════════════════════════════════════════════════
+    # MOTEUR STANDARD — appliqué si le choix prioritaire ne s'active pas
+    # ══════════════════════════════════════════════════════════════════
+
     # Cas 1 : profil scientifique confirmé (zone haute)
-    if SA > LA and moy_sci >= SEUIL_HAUT:
+    elif SA > LA and moy_sci >= SEUIL_HAUT:
         serie      = "C"
         statut     = "confirme"
         msg_diag   = "Profil scientifique confirmé ✅"
@@ -3458,9 +3989,13 @@ elif step == 3:
         elif "A" in serie:
             conseil_revenu = "ℹ️ La série A offre des débouchés accessibles (droit, lettres, administration) compatibles avec le contexte financier familial."
 
-    # Détection du type de conflit
+    # ── Détection du type de conflit ──
+    # Pas de conflit si le choix prioritaire a été appliqué (l'élève avait raison)
     conflit_type = None
-    if SA > LA and "A" in choix:
+    if _choix_C_eligible or _choix_A_eligible:
+        # Choix validé → pas de conflit à signaler
+        conflit_type = None
+    elif SA > LA and "A" in choix:
         conflit_type = "decale"
     elif SA > LA and moy_sci < 10 and "C" in choix:
         conflit_type = "reveur"
@@ -3474,6 +4009,30 @@ elif step == 3:
     st.session_state.probation = probation
     st.session_state.statut = statut
     st.session_state.score_confiance = score_conf
+
+    # ── Bannière choix prioritaire (visible uniquement si la règle s'est appliquée) ──
+    if _choix_C_eligible or _choix_A_eligible:
+        _serie_choisie = "C" if _choix_C_eligible else "A"
+        _apt_val  = SA if _choix_C_eligible else LA
+        _moy_val  = moy_sci if _choix_C_eligible else moy_lit
+        _moy_lbl  = "Sci." if _choix_C_eligible else "Lit."
+        _apt_lbl  = "SA" if _choix_C_eligible else "LA"
+        st.markdown(f"""
+        <div style="background:linear-gradient(135deg,#fdf4ff,#ede9fe);
+                    border-left:5px solid #7c3aed;border-radius:14px;
+                    padding:1rem 1.4rem;margin:0.6rem 0;
+                    box-shadow:0 3px 12px rgba(124,58,237,0.15);">
+            <div style="font-size:0.75rem;font-weight:800;text-transform:uppercase;
+                        letter-spacing:0.1em;color:#7c3aed;margin-bottom:0.4rem;">
+                🎯 Règle prioritaire — Choix de l'élève respecté
+            </div>
+            <div style="font-size:0.9rem;color:#4c1d95;line-height:1.6;">
+                L'élève a choisi la <strong>Série {_serie_choisie}</strong> et remplit les deux conditions requises :<br>
+                &nbsp;• Aptitude {_apt_lbl} = <strong>{_apt_val:.1f}/20 ≥ 10</strong>
+                &nbsp;• Moyenne {_moy_lbl} = <strong>{_moy_val:.1f}/20 ≥ 10</strong><br>
+                Son choix est <strong>validé définitivement</strong>, indépendamment de la comparaison SA/LA.
+            </div>
+        </div>""", unsafe_allow_html=True)
 
     # ---- Affichage des métriques ----
     st.subheader("Analyse du profil")
@@ -3882,6 +4441,77 @@ elif step == 3:
         height=80,
     )
 
+    # ── OVERRIDE DE L'ORIENTATION — Mode conseiller uniquement ──────
+    if mode_conseiller:
+        st.divider()
+        st.subheader("✏️ Décision finale du conseiller")
+        st.markdown("""
+        <div style="background:linear-gradient(135deg,#fffbeb,#fef3c7);
+                    border-left:5px solid #f59e0b; border-radius:12px;
+                    padding:0.9rem 1.2rem; margin-bottom:0.8rem; font-size:0.88rem; color:#78350f;">
+            🧑‍💼 <strong>Droit de révision :</strong> Si vous n'êtes pas d'accord avec la recommandation
+            de l'IA, vous pouvez modifier la décision finale et indiquer votre justification.
+        </div>
+        """, unsafe_allow_html=True)
+
+        serie_actuelle = st.session_state.get("orientation_finale") or serie
+        # Options disponibles selon le contexte
+        series_options = ["— Conserver la recommandation IA —", "C (Scientifique)", "A (Littéraire)", "TECHNIQUE"]
+        override_key   = f"override_serie_{st.session_state.get('session_id','x')}"
+
+        ov1, ov2 = st.columns([2, 3])
+        with ov1:
+            choix_override = st.selectbox(
+                "Modifier l'orientation vers :",
+                series_options,
+                key=override_key,
+                help="Sélectionnez une série pour remplacer la décision de l'IA."
+            )
+        with ov2:
+            justification_override = st.text_input(
+                "Justification obligatoire si modification :",
+                placeholder="Ex: Entretien révèle une forte motivation littéraire non reflétée dans les tests...",
+                key=f"justif_override_{st.session_state.get('session_id','x')}",
+            )
+
+        if choix_override != "— Conserver la recommandation IA —":
+            serie_map = {"C (Scientifique)": "C", "A (Littéraire)": "A", "TECHNIQUE": "TECHNIQUE"}
+            nouvelle_serie = serie_map[choix_override]
+            ia_serie = serie
+
+            couleur_ov = "#10b981" if nouvelle_serie == "C" else "#3b82f6" if nouvelle_serie == "A" else "#f97316"
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#ecfdf5,#d1fae5) ; border-radius:12px;
+                        padding:0.8rem 1.2rem; margin-top:0.4rem; border:2px dashed {couleur_ov};">
+                <span style="font-size:0.85rem; color:#0f172a;">
+                    🔄 Recommandation IA : <strong>{ia_serie}</strong>
+                    &nbsp;→&nbsp;
+                    Décision du conseiller : <strong style="color:{couleur_ov};">{nouvelle_serie}</strong>
+                </span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if st.button("✅ Appliquer ma décision", use_container_width=True, type="primary",
+                         key=f"btn_apply_override_{st.session_state.get('session_id','x')}"):
+                if not justification_override.strip():
+                    st.error("⚠️ Veuillez renseigner une justification avant d'appliquer la modification.")
+                else:
+                    # Appliquer l'override
+                    st.session_state.orientation_finale = nouvelle_serie
+                    # Ajouter la justification dans les notes du conseiller
+                    note_override = (
+                        f"\n[DÉCISION CONSEILLER — override IA] "
+                        f"Orientation modifiée de '{ia_serie}' vers '{nouvelle_serie}'. "
+                        f"Justification : {justification_override.strip()}"
+                    )
+                    st.session_state.notes_conseiller = (
+                        st.session_state.notes_conseiller + note_override
+                    ).strip()
+                    st.success(f"✅ Orientation mise à jour → **Série {nouvelle_serie}**. Sauvegardez le dossier pour confirmer.")
+                    rerun()
+        else:
+            st.caption(f"Recommandation IA actuelle : **Série {serie}** — aucune modification.")
+
     # ── Sauvegarde réservée au conseiller ──
     st.divider()
     sc1, sc2 = st.columns(2)
@@ -4175,4 +4805,3 @@ OBSERVATIONS DU CONSEILLER :
         f"<center><small style='color:#94a3b8;'>CapAvenir CMR v2.5 — 2025 — Mémoire ENS Filière Informatique Niveau 5 &nbsp;|&nbsp; Session : <code>{_sid}</code></small></center>",
         unsafe_allow_html=True
     )
-
